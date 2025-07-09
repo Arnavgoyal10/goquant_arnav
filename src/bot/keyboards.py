@@ -23,26 +23,25 @@ def encode_callback_data(flow: str, step: str, data: Dict[str, Any] = None) -> s
     return f"{flow}|{step}|{json_data}"
 
 
-def decode_callback_data(callback_data: str) -> tuple[str, str, Dict[str, Any]]:
-    """Decode callback data from the form FLOW|STEP|JSON.
-
-    Args:
-        callback_data: Encoded callback data string
-
-    Returns:
-        Tuple of (flow, step, data)
-    """
+def decode_callback_data(callback_data: str) -> tuple[str, str, dict]:
+    """Decode callback data from the form FLOW|STEP|JSON or compact delimited format."""
     try:
-        parts = callback_data.split("|", 2)
-        if len(parts) == 3:
+        parts = callback_data.split("|", 3)
+        if len(parts) == 4:
+            flow, step, part1, part2 = parts
+            # For compact format, join the extra parts for downstream parsing
+            data = f"{part1}|{part2}"
+        elif len(parts) == 3:
             flow, step, json_data = parts
-            data = json.loads(json_data)
+            try:
+                data = json.loads(json_data)
+            except Exception:
+                data = json_data
         elif len(parts) == 2:
             flow, step = parts
             data = {}
         else:
             flow, step, data = callback_data, "", {}
-
         return flow, step, data
     except (json.JSONDecodeError, ValueError):
         # Fallback for simple callback data
@@ -233,9 +232,7 @@ def get_risk_config_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
-def get_confirmation_buttons(
-    action: str, data: Dict[str, Any] = None
-) -> InlineKeyboardMarkup:
+def get_confirmation_buttons(flow: str) -> InlineKeyboardMarkup:
     """Get confirmation buttons for an action.
 
     Args:
@@ -245,19 +242,12 @@ def get_confirmation_buttons(
     Returns:
         InlineKeyboardMarkup with confirm/cancel buttons
     """
-    keyboard = [
+    return InlineKeyboardMarkup(
         [
-            InlineKeyboardButton(
-                "✅ Confirm",
-                callback_data=encode_callback_data(action, "confirm", data or {}),
-            ),
-            InlineKeyboardButton(
-                "❌ Cancel", callback_data=encode_callback_data(action, "cancel")
-            ),
+            [InlineKeyboardButton("✅ Confirm", callback_data=f"{flow}|confirm|{{}}")],
+            [InlineKeyboardButton("❌ Cancel", callback_data=f"{flow}|cancel|{{}}")],
         ]
-    ]
-
-    return InlineKeyboardMarkup(keyboard)
+    )
 
 
 def get_pagination_buttons(
