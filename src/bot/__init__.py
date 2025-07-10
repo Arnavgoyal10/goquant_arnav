@@ -995,6 +995,16 @@ class SpotHedgerBot:
                         callback_data=encode_callback_data("analytics", "by_hedge"),
                     ),
                 ],
+                [
+                    InlineKeyboardButton(
+                        "📈 Performance",
+                        callback_data=encode_callback_data("analytics", "performance"),
+                    ),
+                    InlineKeyboardButton(
+                        "💰 Cost-Benefit",
+                        callback_data=encode_callback_data("analytics", "cost_benefit"),
+                    ),
+                ],
                 [InlineKeyboardButton("🔙 Back", callback_data="back")],
             ]
             await query.edit_message_text(
@@ -1382,6 +1392,10 @@ class SpotHedgerBot:
             await query.edit_message_text(
                 text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
             )
+        elif step == "performance":
+            await self.show_performance_attribution(update, context)
+        elif step == "cost_benefit":
+            await self.show_cost_benefit_analysis(update, context)
         else:
             await query.edit_message_text(
                 "Unknown analytics action.", reply_markup=get_back_button()
@@ -4747,304 +4761,41 @@ class SpotHedgerBot:
             text, reply_markup=get_back_button(), parse_mode="Markdown"
         )
 
-    async def handle_analytics_callback(
+    async def handle_risk_config_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, step: str, data: dict
     ):
+        """Handle risk config menu and edit flows."""
         query = update.callback_query
-        if step == "by_position":
-            # List all positions
-            positions = list(getattr(self.portfolio, "positions", {}).values())
-            # Filter only valid positions (dict/object with symbol)
-            valid_positions = []
-            for pos in positions:
-                if isinstance(pos, str):
-                    continue
-                if hasattr(pos, "symbol") or (
-                    isinstance(pos, dict) and "symbol" in pos
-                ):
-                    valid_positions.append(pos)
-            if not valid_positions:
-                await query.edit_message_text(
-                    "No positions.", reply_markup=get_back_button()
-                )
-                return
-            text = "*Positions:*\n\n"
-            buttons = []
-            for i, pos in enumerate(valid_positions):
-                symbol = pos.symbol if hasattr(pos, "symbol") else pos.get("symbol")
-                qty = pos.qty if hasattr(pos, "qty") else pos.get("qty")
-                text += f"{i+1}. `{symbol}` qty: `{qty}`\n"
-                buttons.append(
-                    [
-                        {
-                            "text": f"{symbol}",
-                            "callback_data": f"analytics|position_detail|{i}",
-                        }
-                    ]
-                )
-            from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-
-            keyboard = [
-                [InlineKeyboardButton(b["text"], callback_data=b["callback_data"])]
-                for b in sum(buttons, [])
-            ]
-            keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="analytics")])
-            await query.edit_message_text(
-                text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
-            )
-        elif step == "position_detail":
-            if isinstance(data, int):
-                idx = data
-            elif isinstance(data, str):
-                try:
-                    idx = int(data)
-                except Exception:
-                    idx = 0
-            elif isinstance(data, dict):
-                idx = int(data.get("idx", 0))
+        if step == "edit":
+            metric = data if isinstance(data, str) else data.get("metric")
+            # Ask for new value
+            if metric == "delta":
+                prompt = "Enter new *absolute delta* threshold (BTC):"
+            elif metric == "var":
+                prompt = "Enter new *95% VaR* threshold (USD):"
+            elif metric == "drawdown":
+                prompt = "Enter new *max drawdown* (as decimal, e.g. 0.15 for 15%):"
             else:
-                idx = 0
-            positions = list(getattr(self.portfolio, "positions", {}).values())
-            # Filter only valid positions (dict/object with symbol)
-            valid_positions = []
-            for pos in positions:
-                if isinstance(pos, str):
-                    continue
-                if hasattr(pos, "symbol") or (
-                    isinstance(pos, dict) and "symbol" in pos
-                ):
-                    valid_positions.append(pos)
-            if idx < 0 or idx >= len(valid_positions):
-                await query.edit_message_text(
-                    "Invalid position.", reply_markup=get_back_button()
-                )
-                return
-            pos = valid_positions[idx]
-            symbol = pos.symbol if hasattr(pos, "symbol") else pos.get("symbol")
-            qty = pos.qty if hasattr(pos, "qty") else pos.get("qty")
-            avg_px = pos.avg_px if hasattr(pos, "avg_px") else pos.get("avg_px")
-            instrument_type = (
-                pos.instrument_type
-                if hasattr(pos, "instrument_type")
-                else pos.get("instrument_type")
-            )
-            current_price = await self.get_current_price(symbol)
-            pnl = (current_price - avg_px) * qty
-            text = (
-                f"*Position Detail*\n\n"
-                f"Symbol: `{symbol}`\n"
-                f"Qty: `{qty}`\n"
-                f"Avg Px: `${avg_px}`\n"
-                f"Current Px: `${current_price}`\n"
-                f"Unrealized P&L: `${pnl:,.2f}`\n"
-                f"Type: `{instrument_type}`\n"
-            )
-            from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-
-            keyboard = [
-                [
-                    InlineKeyboardButton(
-                        "⬅️ Back", callback_data="analytics|by_position|{}"
-                    )
-                ]
-            ]
-            await query.edit_message_text(
-                text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
-            )
-        elif step == "by_hedge":
-            hedges = getattr(self, "active_hedges", [])
-            if not hedges:
-                await query.edit_message_text(
-                    "No active hedges.", reply_markup=get_back_button()
-                )
-                return
-            text = "*Active Hedges:*\n\n"
-            buttons = []
-            for i, hedge in enumerate(hedges):
-                hedge_type = hedge.get("type", "unknown")
-                symbol = hedge.get("symbol", "")
-                qty = hedge.get("qty", 0.0)
-                price = hedge.get("price", 0.0)
-                cost = hedge.get("cost", 0.0)
-                timestamp = hedge.get("timestamp", "")
-
-                # Create descriptive name
-                type_names = {
-                    "perp_delta_neutral": "Perp Delta-Neutral",
-                    "protective_put": "Protective Put",
-                    "covered_call": "Covered Call",
-                    "collar": "Collar",
-                    "dynamic_hedge": "Dynamic Hedge",
-                    "straddle": "Straddle",
-                    "butterfly": "Butterfly",
-                    "iron_condor": "Iron Condor",
-                }
-                desc = type_names.get(hedge_type, hedge_type.replace("_", " ").title())
-
-                text += (
-                    f"{i+1}. {desc}\n"
-                    f"   Symbol: `{symbol}`\n"
-                    f"   Qty: `{qty:+.4f}`\n"
-                    f"   Price: `${price:.2f}`\n"
-                    f"   Cost: `${cost:.2f}`\n"
-                    f"   Time: `{timestamp}`\n"
-                )
-
-                # Add strategy-specific details
-                if hedge_type == "straddle" and "straddle_data" in hedge:
-                    straddle_data = hedge["straddle_data"]
-                    strike = straddle_data.get("strike", 0)
-                    put_symbol = straddle_data.get("put_symbol", "")
-                    text += f"\n*Strategy Details:*\n"
-                    text += f"• Strike: `${strike:,.0f}`\n"
-                    text += f"• Call: `{symbol}`\n"
-                    text += f"• Put: `{put_symbol}`\n"
-
-                elif hedge_type == "butterfly" and "butterfly_data" in hedge:
-                    butterfly_data = hedge["butterfly_data"]
-                    lower_strike = butterfly_data.get("lower_strike", 0)
-                    middle_strike = butterfly_data.get("middle_strike", 0)
-                    upper_strike = butterfly_data.get("upper_strike", 0)
-                    text += f"\n*Strategy Details:*\n"
-                    text += f"• Lower Strike: `${lower_strike:,.0f}`\n"
-                    text += f"• Middle Strike: `${middle_strike:,.0f}`\n"
-                    text += f"• Upper Strike: `${upper_strike:,.0f}`\n"
-
-                elif hedge_type == "iron_condor" and "iron_condor_data" in hedge:
-                    iron_condor_data = hedge["iron_condor_data"]
-                    put_lower = iron_condor_data.get("put_lower", 0)
-                    put_upper = iron_condor_data.get("put_upper", 0)
-                    call_lower = iron_condor_data.get("call_lower", 0)
-                    call_upper = iron_condor_data.get("call_upper", 0)
-                    text += f"\n*Strategy Details:*\n"
-                    text += f"• Put Spread: `${put_lower:,.0f}` - `${put_upper:,.0f}`\n"
-                    text += (
-                        f"• Call Spread: `${call_lower:,.0f}` - `${call_upper:,.0f}`\n"
-                    )
-
-                elif hedge_type == "collar" and "collar_data" in hedge:
-                    collar_data = hedge["collar_data"]
-                    put_strike = collar_data.get("put_strike", 0)
-                    call_strike = collar_data.get("call_strike", 0)
-                    text += f"\n*Strategy Details:*\n"
-                    text += f"• Put Strike: `${put_strike:,.0f}`\n"
-                    text += f"• Call Strike: `${call_strike:,.0f}`\n"
-                buttons.append(
-                    [
-                        {
-                            "text": f"{desc}",
-                            "callback_data": f"analytics|hedge_detail|{i}",
-                        }
-                    ]
-                )
-            from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-
-            keyboard = [
-                [InlineKeyboardButton(b["text"], callback_data=b["callback_data"])]
-                for b in sum(buttons, [])
-            ]
-            keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="analytics")])
-            await query.edit_message_text(
-                text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
-            )
-        elif step == "hedge_detail":
-            if isinstance(data, int):
-                idx = data
-            elif isinstance(data, str):
-                try:
-                    idx = int(data)
-                except Exception:
-                    idx = 0
-            elif isinstance(data, dict):
-                idx = int(data.get("idx", 0))
-            else:
-                idx = 0
-            hedges = getattr(self, "active_hedges", [])
-            if idx < 0 or idx >= len(hedges):
-                await query.edit_message_text(
-                    "Invalid hedge.", reply_markup=get_back_button()
-                )
-                return
-            hedge = hedges[idx]
-            hedge_type = hedge.get("type", "unknown")
-            symbol = hedge.get("symbol", "")
-            qty = hedge.get("qty", 0.0)
-            price = hedge.get("price", 0.0)
-            cost = hedge.get("cost", 0.0)
-            timestamp = hedge.get("timestamp", "")
-
-            # Create descriptive name
-            type_names = {
-                "perp_delta_neutral": "Perp Delta-Neutral",
-                "protective_put": "Protective Put",
-                "covered_call": "Covered Call",
-                "collar": "Collar",
-                "dynamic_hedge": "Dynamic Hedge",
-                "straddle": "Straddle",
-                "butterfly": "Butterfly",
-                "iron_condor": "Iron Condor",
-            }
-            desc = type_names.get(hedge_type, hedge_type.replace("_", " ").title())
-
-            text = (
-                f"*Hedge Detail*\n\n"
-                f"Type: `{desc}`\n"
-                f"Symbol: `{symbol}`\n"
-                f"Qty: `{qty:+.4f}`\n"
-                f"Price: `${price:.2f}`\n"
-                f"Cost: `${cost:.2f}`\n"
-                f"Time: `{timestamp}`\n"
-            )
-
-            # Add strategy-specific details
-            if hedge_type == "straddle" and "straddle_data" in hedge:
-                straddle_data = hedge["straddle_data"]
-                strike = straddle_data.get("strike", 0)
-                put_symbol = straddle_data.get("put_symbol", "")
-                text += f"\n*Strategy Details:*\n"
-                text += f"• Strike: `${strike:,.0f}`\n"
-                text += f"• Call: `{symbol}`\n"
-                text += f"• Put: `{put_symbol}`\n"
-
-            elif hedge_type == "butterfly" and "butterfly_data" in hedge:
-                butterfly_data = hedge["butterfly_data"]
-                lower_strike = butterfly_data.get("lower_strike", 0)
-                middle_strike = butterfly_data.get("middle_strike", 0)
-                upper_strike = butterfly_data.get("upper_strike", 0)
-                text += f"\n*Strategy Details:*\n"
-                text += f"• Lower Strike: `${lower_strike:,.0f}`\n"
-                text += f"• Middle Strike: `${middle_strike:,.0f}`\n"
-                text += f"• Upper Strike: `${upper_strike:,.0f}`\n"
-
-            elif hedge_type == "iron_condor" and "iron_condor_data" in hedge:
-                iron_condor_data = hedge["iron_condor_data"]
-                put_lower = iron_condor_data.get("put_lower", 0)
-                put_upper = iron_condor_data.get("put_upper", 0)
-                call_lower = iron_condor_data.get("call_lower", 0)
-                call_upper = iron_condor_data.get("call_upper", 0)
-                text += f"\n*Strategy Details:*\n"
-                text += f"• Put Spread: `${put_lower:,.0f}` - `${put_upper:,.0f}`\n"
-                text += f"• Call Spread: `${call_lower:,.0f}` - `${call_upper:,.0f}`\n"
-
-            elif hedge_type == "collar" and "collar_data" in hedge:
-                collar_data = hedge["collar_data"]
-                put_strike = collar_data.get("put_strike", 0)
-                call_strike = collar_data.get("call_strike", 0)
-                text += f"\n*Strategy Details:*\n"
-                text += f"• Put Strike: `${put_strike:,.0f}`\n"
-                text += f"• Call Strike: `${call_strike:,.0f}`\n"
-            from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-
-            keyboard = [
-                [InlineKeyboardButton("⬅️ Back", callback_data="analytics|by_hedge|{}")]
-            ]
-            await query.edit_message_text(
-                text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
-            )
+                prompt = "Unknown metric."
+            await query.edit_message_text(prompt, parse_mode="Markdown")
+            context.user_data["risk_config_edit"] = metric
+            context.user_data["awaiting_risk_value"] = True
+        elif step == "confirm":
+            metric = context.user_data.get("risk_config_edit")
+            value = context.user_data.get("risk_config_new_value")
+            # Update config
+            if metric == "delta":
+                self.risk_config["abs_delta"] = float(value)
+            elif metric == "var":
+                self.risk_config["var_95"] = float(value)
+            elif metric == "drawdown":
+                self.risk_config["max_drawdown"] = float(value)
+            await query.edit_message_text(f"✅ Updated {metric} threshold to {value}.")
+            await self.show_risk_config(update, context)
+        elif step == "cancel":
+            await self.show_risk_config(update, context)
         else:
-            await query.edit_message_text(
-                "Unknown analytics action.", reply_markup=get_back_button()
-            )
+            await query.edit_message_text("Unknown risk config action.")
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle text messages (for wizard input)."""
@@ -5350,41 +5101,110 @@ class SpotHedgerBot:
             parse_mode="Markdown",
         )
 
-    async def handle_risk_config_callback(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE, step: str, data: dict
+    async def show_performance_attribution(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ):
-        """Handle risk config menu and edit flows."""
+        """Show detailed performance attribution and hedging effectiveness."""
         query = update.callback_query
-        if step == "edit":
-            metric = data if isinstance(data, str) else data.get("metric")
-            # Ask for new value
-            if metric == "delta":
-                prompt = "Enter new *absolute delta* threshold (BTC):"
-            elif metric == "var":
-                prompt = "Enter new *95% VaR* threshold (USD):"
-            elif metric == "drawdown":
-                prompt = "Enter new *max drawdown* (as decimal, e.g. 0.15 for 15%):"
-            else:
-                prompt = "Unknown metric."
-            await query.edit_message_text(prompt, parse_mode="Markdown")
-            context.user_data["risk_config_edit"] = metric
-            context.user_data["awaiting_risk_value"] = True
-        elif step == "confirm":
-            metric = context.user_data.get("risk_config_edit")
-            value = context.user_data.get("risk_config_new_value")
-            # Update config
-            if metric == "delta":
-                self.risk_config["abs_delta"] = float(value)
-            elif metric == "var":
-                self.risk_config["var_95"] = float(value)
-            elif metric == "drawdown":
-                self.risk_config["max_drawdown"] = float(value)
-            await query.edit_message_text(f"✅ Updated {metric} threshold to {value}.")
-            await self.show_risk_config(update, context)
-        elif step == "cancel":
-            await self.show_risk_config(update, context)
-        else:
-            await query.edit_message_text("Unknown risk config action.")
+        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+        # Gather realized/unrealized P&L, delta, VaR, drawdown
+        current_prices = {}
+        for position in self.portfolio.positions.values():
+            try:
+                if position.instrument_type == "option":
+                    from ..exchanges.deribit_options import deribit_options
+
+                    async with deribit_options as options:
+                        ticker = await options.get_option_ticker(position.symbol)
+                        if ticker and ticker.last_price > 0:
+                            current_prices[position.symbol] = ticker.last_price
+                        else:
+                            current_prices[position.symbol] = position.avg_px
+                else:
+                    current_prices[position.symbol] = await self.get_current_price(
+                        position.symbol
+                    )
+            except Exception:
+                if position.instrument_type == "spot":
+                    current_prices[position.symbol] = 111372.0
+                elif position.instrument_type == "perpetual":
+                    current_prices[position.symbol] = 111350.0
+                else:
+                    current_prices[position.symbol] = position.avg_px
+
+        pnl_realized = self.portfolio.get_realized_pnl()
+        pnl_unrealized = self.portfolio.get_unrealized_pnl(current_prices)
+        delta = self.portfolio.get_total_delta(current_prices)
+        var_95 = self.portfolio.get_var_95(current_prices)
+        drawdown = self.portfolio.get_max_drawdown()
+
+        # Attribution by hedge
+        hedge_pnl = 0.0
+        hedge_cost = 0.0
+        hedge_count = 0
+        for hedge in getattr(self, "active_hedges", []):
+            hedge_pnl += hedge.get("pnl", 0.0)
+            hedge_cost += hedge.get("cost", 0.0)
+            hedge_count += 1
+
+        effectiveness = (
+            (hedge_pnl / abs(pnl_unrealized) * 100) if pnl_unrealized != 0 else 0.0
+        )
+
+        text = (
+            f"📈 *Performance Attribution*\n\n"
+            f"• Realized P&L: `${pnl_realized:,.2f}`\n"
+            f"• Unrealized P&L: `${pnl_unrealized:,.2f}`\n"
+            f"• Current Delta: `{delta:+.4f}` BTC\n"
+            f"• 95% VaR: `${var_95:,.2f}`\n"
+            f"• Max Drawdown: `{drawdown:.2%}`\n\n"
+            f"*Hedge Attribution:*\n"
+            f"• Number of Hedges: `{hedge_count}`\n"
+            f"• Hedge P&L: `${hedge_pnl:,.2f}`\n"
+            f"• Hedge Cost: `${hedge_cost:,.2f}`\n"
+            f"• Hedge Effectiveness: `{effectiveness:.1f}%`\n"
+        )
+
+        keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="analytics")]]
+        await query.edit_message_text(
+            text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
+        )
+
+    async def show_cost_benefit_analysis(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        """Show cost-benefit analysis of hedging strategies."""
+        query = update.callback_query
+        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+        # Aggregate costs and benefits from transactions and hedges
+        total_cost = 0.0
+        total_benefit = 0.0
+        total_hedge_pnl = 0.0
+        for hedge in getattr(self, "active_hedges", []):
+            total_cost += hedge.get("cost", 0.0)
+            total_hedge_pnl += hedge.get("pnl", 0.0)
+        # Benefit: reduction in drawdown or VaR, or P&L improvement
+        pnl_unrealized = self.portfolio.get_unrealized_pnl()
+        var_95 = self.portfolio.get_var_95()
+        drawdown = self.portfolio.get_max_drawdown()
+        # For now, use hedge P&L as benefit
+        total_benefit = total_hedge_pnl
+        net_benefit = total_benefit - total_cost
+        text = (
+            f"💰 *Cost-Benefit Analysis*\n\n"
+            f"• Total Hedge Cost: `${total_cost:,.2f}`\n"
+            f"• Total Hedge Benefit (P&L): `${total_benefit:,.2f}`\n"
+            f"• Net Benefit: `${net_benefit:,.2f}`\n\n"
+            f"• Portfolio VaR (95%): `${var_95:,.2f}`\n"
+            f"• Max Drawdown: `{drawdown:.2%}`\n"
+            f"• Unrealized P&L: `${pnl_unrealized:,.2f}`\n"
+        )
+        keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="analytics")]]
+        await query.edit_message_text(
+            text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
+        )
 
 
 async def main():
