@@ -107,6 +107,7 @@ class SpotHedgerBot:
 
         # Add handlers
         self.application.add_handler(CommandHandler("start", self.start_command))
+        self.application.add_handler(CommandHandler("report", self.report_command))
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
         self.application.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message)
@@ -250,6 +251,152 @@ class SpotHedgerBot:
         if hasattr(self, "application") and self.application:
             self.application.bot_data["main_user_id"] = user.id
         self.last_user_id = user.id
+
+    async def report_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /report command - generate and send CSV report."""
+        user = update.effective_user
+        logger.info(f"User {user.id} requested report")
+
+        try:
+            # Generate CSV report
+            csv_data = await self.generate_transaction_report()
+
+            if not csv_data:
+                await update.message.reply_text(
+                    "❌ No transaction data available to generate report.",
+                    parse_mode="Markdown",
+                )
+                return
+
+            # Create CSV file
+            import io
+
+            csv_file = io.BytesIO(csv_data.encode("utf-8"))
+            csv_file.name = (
+                f"transaction_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            )
+
+            # Send CSV file
+            await update.message.reply_document(
+                document=csv_file,
+                filename=csv_file.name,
+                caption="📊 *Transaction Report*\n\nDetailed CSV report of all transactions with timestamps, profits, and more.",
+                parse_mode="Markdown",
+            )
+
+        except Exception as e:
+            logger.error(f"Error generating report: {e}")
+            await update.message.reply_text(
+                "❌ Failed to generate report. Please try again later.",
+                parse_mode="Markdown",
+            )
+
+    async def generate_transaction_report(self) -> str:
+        """Generate CSV report of transaction history.
+
+        Returns:
+            CSV string with transaction data
+        """
+        import csv
+        import io
+
+        # Get transaction history
+        transactions = self.portfolio.get_transaction_history()
+
+        if not transactions:
+            return ""
+
+        # Create CSV output
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        # Write header
+        writer.writerow(
+            [
+                "Transaction ID",
+                "Timestamp",
+                "Symbol",
+                "Transaction Type",
+                "Quantity",
+                "Price",
+                "Notional Value",
+                "Realized P&L",
+                "Instrument Type",
+                "Exchange",
+                "Notes",
+            ]
+        )
+
+        # Write transaction data
+        for tx in transactions:
+            notional = abs(tx.qty * tx.price)
+            realized_pnl = tx.pnl if tx.pnl is not None else 0.0
+
+            writer.writerow(
+                [
+                    tx.id,
+                    tx.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                    tx.symbol,
+                    tx.transaction_type.upper(),
+                    f"{tx.qty:+.6f}",
+                    f"${tx.price:.4f}",
+                    f"${notional:,.2f}",
+                    f"${realized_pnl:+.2f}" if realized_pnl != 0 else "$0.00",
+                    tx.instrument_type.upper(),
+                    tx.exchange.upper(),
+                    tx.notes or "",
+                ]
+            )
+
+        # Get summary statistics
+        summary = self.portfolio.get_transaction_summary()
+
+        # Add summary section
+        output.write("\n\nSUMMARY STATISTICS\n")
+        output.write("=" * 50 + "\n")
+        output.write(f"Total Transactions: {summary['total_transactions']}\n")
+        output.write(f"Total Volume: ${summary['total_volume']:,.2f}\n")
+        output.write(f"Total P&L: ${summary['total_pnl']:+,.2f}\n")
+
+        # Add current portfolio snapshot
+        snapshot = self.portfolio.snapshot()
+        output.write(f"\nCURRENT PORTFOLIO\n")
+        output.write("=" * 50 + "\n")
+        output.write(f"Total Positions: {snapshot['total_positions']}\n")
+        output.write(f"Total Notional: ${snapshot['total_notional']:,.2f}\n")
+
+        # Add current positions
+        if self.portfolio.positions:
+            output.write(f"\nCURRENT POSITIONS\n")
+            output.write("=" * 50 + "\n")
+            output.write("Symbol,Quantity,Avg Price,Notional,Direction\n")
+
+            for symbol, pos in self.portfolio.positions.items():
+                direction = "LONG" if pos.is_long else "SHORT"
+                notional = abs(pos.qty * pos.avg_px)
+                output.write(
+                    f"{pos.symbol},{pos.qty:+.6f},${pos.avg_px:.4f},${notional:,.2f},{direction}\n"
+                )
+
+        # Add active hedges if any
+        if hasattr(self, "active_hedges") and self.active_hedges:
+            output.write(f"\nACTIVE HEDGES\n")
+            output.write("=" * 50 + "\n")
+            output.write("Type,Symbol,Quantity,Price,Cost,Timestamp\n")
+
+            for hedge in self.active_hedges:
+                hedge_type = hedge.get("type", "unknown")
+                symbol = hedge.get("symbol", "")
+                qty = hedge.get("qty", 0)
+                price = hedge.get("price", 0)
+                cost = hedge.get("cost", 0)
+                timestamp = hedge.get("timestamp", "")
+
+                output.write(
+                    f"{hedge_type},{symbol},{qty:+.6f},${price:.4f},${cost:.2f},{timestamp}\n"
+                )
+
+        return output.getvalue()
 
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle callback queries from inline keyboards."""
