@@ -1,6 +1,7 @@
 """Telegram bot core for the spot hedging bot."""
 
 import asyncio
+import aiohttp
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -724,23 +725,96 @@ class SpotHedgerBot:
 
         try:
             logger.info("show_analytics called")
-            # Gather analytics using portfolio methods
+
+            # Get current prices for all positions
+            current_prices = {}
+            for position in self.portfolio.positions.values():
+                try:
+                    if position.instrument_type == "option":
+                        # For options, try to get current price from Deribit
+                        from ..exchanges.deribit_options import deribit_options
+
+                        async with deribit_options as options:
+                            ticker = await options.get_option_ticker(position.symbol)
+                            if ticker and ticker.last_price > 0:
+                                current_prices[position.symbol] = ticker.last_price
+                            else:
+                                current_prices[position.symbol] = position.avg_px
+                    else:
+                        # For spot/perpetual, get current price
+                        current_prices[position.symbol] = await self.get_current_price(
+                            position.symbol
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to get price for {position.symbol}: {e}")
+                    # Use fallback prices
+                    if position.instrument_type == "spot":
+                        current_prices[position.symbol] = 111372.0
+                    elif position.instrument_type == "perpetual":
+                        current_prices[position.symbol] = 111350.0
+                    else:
+                        current_prices[position.symbol] = position.avg_px
+
+            # Gather analytics using portfolio methods with current prices
             pnl_realized = self.portfolio.get_realized_pnl()
-            pnl_unrealized = self.portfolio.get_unrealized_pnl()
-            delta = self.portfolio.get_total_delta()
-            var_95 = self.portfolio.get_var_95()
+            pnl_unrealized = self.portfolio.get_unrealized_pnl(current_prices)
+            delta = self.portfolio.get_total_delta(current_prices)
+            var_95 = self.portfolio.get_var_95(current_prices)
             drawdown = self.portfolio.get_max_drawdown()
 
             # Hedge effectiveness: % delta hedged
             gross_delta = abs(delta)
             spot_delta = delta  # For now, use total delta
-            hedge_delta = 0.0  # This would be calculated from hedge positions
+
+            # Calculate hedge delta from active hedges
+            hedge_delta = 0.0
+            for hedge in self.active_hedges:
+                hedge_type = hedge.get("type", "")
+                if hedge_type in [
+                    "protective_put",
+                    "covered_call",
+                    "collar",
+                    "straddle",
+                    "butterfly",
+                    "iron_condor",
+                ]:
+                    # These are option-based hedges that affect delta
+                    qty = hedge.get("qty", 0)
+                    if hedge_type == "protective_put":
+                        hedge_delta += qty  # Long put reduces delta
+                    elif hedge_type == "covered_call":
+                        hedge_delta -= qty  # Short call reduces delta
+                    elif hedge_type == "collar":
+                        # Collar has both put and call effects
+                        collar_data = hedge.get("collar_data", {})
+                        put_qty = collar_data.get("put_qty", 0)
+                        call_qty = collar_data.get("call_qty", 0)
+                        hedge_delta += put_qty - call_qty
+                    elif hedge_type == "straddle":
+                        # Straddle has both call and put legs
+                        straddle_data = hedge.get("straddle_data", {})
+                        call_qty = qty
+                        put_qty = qty
+                        hedge_delta += put_qty - call_qty  # Net effect
+                    elif hedge_type == "butterfly":
+                        # Butterfly has 3 legs: long lower, short 2 middle, long upper
+                        butterfly_data = hedge.get("butterfly_data", {})
+                        lower_qty = qty
+                        middle_qty = -2 * qty
+                        upper_qty = qty
+                        # Simplified delta calculation
+                        hedge_delta += (lower_qty + middle_qty + upper_qty) * 0.5
+                    elif hedge_type == "iron_condor":
+                        # Iron condor has 4 legs with complex delta profile
+                        # Simplified: assume neutral delta for iron condor
+                        hedge_delta += 0.0
+
             effectiveness = (
                 (abs(hedge_delta) / gross_delta * 100) if gross_delta > 0 else 0.0
             )
 
-            # Option Greeks summary
-            greeks = self.portfolio.get_greeks_summary()
+            # Option Greeks summary with current prices
+            greeks = self.portfolio.get_greeks_summary(current_prices)
             greeks_text = ""
             if greeks:
                 greeks_text = "\n".join(
@@ -981,8 +1055,74 @@ class SpotHedgerBot:
             text = "*Active Hedges:*\n\n"
             buttons = []
             for i, hedge in enumerate(hedges):
-                desc = hedge.get("desc", hedge.get("symbol", f"Hedge {i+1}"))
-                text += f"{i+1}. {desc}\n"
+                hedge_type = hedge.get("type", "unknown")
+                symbol = hedge.get("symbol", "")
+                qty = hedge.get("qty", 0.0)
+                price = hedge.get("price", 0.0)
+                cost = hedge.get("cost", 0.0)
+                timestamp = hedge.get("timestamp", "")
+
+                # Create descriptive name
+                type_names = {
+                    "perp_delta_neutral": "Perp Delta-Neutral",
+                    "protective_put": "Protective Put",
+                    "covered_call": "Covered Call",
+                    "collar": "Collar",
+                    "dynamic_hedge": "Dynamic Hedge",
+                    "straddle": "Straddle",
+                    "butterfly": "Butterfly",
+                    "iron_condor": "Iron Condor",
+                }
+                desc = type_names.get(hedge_type, hedge_type.replace("_", " ").title())
+
+                text += (
+                    f"{i+1}. {desc}\n"
+                    f"   Symbol: `{symbol}`\n"
+                    f"   Qty: `{qty:+.4f}`\n"
+                    f"   Price: `${price:.2f}`\n"
+                    f"   Cost: `${cost:.2f}`\n"
+                    f"   Time: `{timestamp}`\n"
+                )
+
+                # Add strategy-specific details
+                if hedge_type == "straddle" and "straddle_data" in hedge:
+                    straddle_data = hedge["straddle_data"]
+                    strike = straddle_data.get("strike", 0)
+                    put_symbol = straddle_data.get("put_symbol", "")
+                    text += f"\n*Strategy Details:*\n"
+                    text += f"• Strike: `${strike:,.0f}`\n"
+                    text += f"• Call: `{symbol}`\n"
+                    text += f"• Put: `{put_symbol}`\n"
+
+                elif hedge_type == "butterfly" and "butterfly_data" in hedge:
+                    butterfly_data = hedge["butterfly_data"]
+                    lower_strike = butterfly_data.get("lower_strike", 0)
+                    middle_strike = butterfly_data.get("middle_strike", 0)
+                    upper_strike = butterfly_data.get("upper_strike", 0)
+                    text += f"\n*Strategy Details:*\n"
+                    text += f"• Lower Strike: `${lower_strike:,.0f}`\n"
+                    text += f"• Middle Strike: `${middle_strike:,.0f}`\n"
+                    text += f"• Upper Strike: `${upper_strike:,.0f}`\n"
+
+                elif hedge_type == "iron_condor" and "iron_condor_data" in hedge:
+                    iron_condor_data = hedge["iron_condor_data"]
+                    put_lower = iron_condor_data.get("put_lower", 0)
+                    put_upper = iron_condor_data.get("put_upper", 0)
+                    call_lower = iron_condor_data.get("call_lower", 0)
+                    call_upper = iron_condor_data.get("call_upper", 0)
+                    text += f"\n*Strategy Details:*\n"
+                    text += f"• Put Spread: `${put_lower:,.0f}` - `${put_upper:,.0f}`\n"
+                    text += (
+                        f"• Call Spread: `${call_lower:,.0f}` - `${call_upper:,.0f}`\n"
+                    )
+
+                elif hedge_type == "collar" and "collar_data" in hedge:
+                    collar_data = hedge["collar_data"]
+                    put_strike = collar_data.get("put_strike", 0)
+                    call_strike = collar_data.get("call_strike", 0)
+                    text += f"\n*Strategy Details:*\n"
+                    text += f"• Put Strike: `${put_strike:,.0f}`\n"
+                    text += f"• Call Strike: `${call_strike:,.0f}`\n"
                 buttons.append(
                     [
                         {
@@ -1020,17 +1160,73 @@ class SpotHedgerBot:
                 )
                 return
             hedge = hedges[idx]
-            desc = hedge.get("desc", hedge.get("symbol", f"Hedge {idx+1}"))
+            hedge_type = hedge.get("type", "unknown")
+            symbol = hedge.get("symbol", "")
+            qty = hedge.get("qty", 0.0)
             price = hedge.get("price", 0.0)
             cost = hedge.get("cost", 0.0)
-            qty = hedge.get("qty", 0.0)
+            timestamp = hedge.get("timestamp", "")
+
+            # Create descriptive name
+            type_names = {
+                "perp_delta_neutral": "Perp Delta-Neutral",
+                "protective_put": "Protective Put",
+                "covered_call": "Covered Call",
+                "collar": "Collar",
+                "dynamic_hedge": "Dynamic Hedge",
+                "straddle": "Straddle",
+                "butterfly": "Butterfly",
+                "iron_condor": "Iron Condor",
+            }
+            desc = type_names.get(hedge_type, hedge_type.replace("_", " ").title())
+
             text = (
                 f"*Hedge Detail*\n\n"
-                f"Desc: `{desc}`\n"
-                f"Qty: `{qty}`\n"
-                f"Price: `${price}`\n"
-                f"Cost: `${cost}`\n"
+                f"Type: `{desc}`\n"
+                f"Symbol: `{symbol}`\n"
+                f"Qty: `{qty:+.4f}`\n"
+                f"Price: `${price:.2f}`\n"
+                f"Cost: `${cost:.2f}`\n"
+                f"Time: `{timestamp}`\n"
             )
+
+            # Add strategy-specific details
+            if hedge_type == "straddle" and "straddle_data" in hedge:
+                straddle_data = hedge["straddle_data"]
+                strike = straddle_data.get("strike", 0)
+                put_symbol = straddle_data.get("put_symbol", "")
+                text += f"\n*Strategy Details:*\n"
+                text += f"• Strike: `${strike:,.0f}`\n"
+                text += f"• Call: `{symbol}`\n"
+                text += f"• Put: `{put_symbol}`\n"
+
+            elif hedge_type == "butterfly" and "butterfly_data" in hedge:
+                butterfly_data = hedge["butterfly_data"]
+                lower_strike = butterfly_data.get("lower_strike", 0)
+                middle_strike = butterfly_data.get("middle_strike", 0)
+                upper_strike = butterfly_data.get("upper_strike", 0)
+                text += f"\n*Strategy Details:*\n"
+                text += f"• Lower Strike: `${lower_strike:,.0f}`\n"
+                text += f"• Middle Strike: `${middle_strike:,.0f}`\n"
+                text += f"• Upper Strike: `${upper_strike:,.0f}`\n"
+
+            elif hedge_type == "iron_condor" and "iron_condor_data" in hedge:
+                iron_condor_data = hedge["iron_condor_data"]
+                put_lower = iron_condor_data.get("put_lower", 0)
+                put_upper = iron_condor_data.get("put_upper", 0)
+                call_lower = iron_condor_data.get("call_lower", 0)
+                call_upper = iron_condor_data.get("call_upper", 0)
+                text += f"\n*Strategy Details:*\n"
+                text += f"• Put Spread: `${put_lower:,.0f}` - `${put_upper:,.0f}`\n"
+                text += f"• Call Spread: `${call_lower:,.0f}` - `${call_upper:,.0f}`\n"
+
+            elif hedge_type == "collar" and "collar_data" in hedge:
+                collar_data = hedge["collar_data"]
+                put_strike = collar_data.get("put_strike", 0)
+                call_strike = collar_data.get("call_strike", 0)
+                text += f"\n*Strategy Details:*\n"
+                text += f"• Put Strike: `${put_strike:,.0f}`\n"
+                text += f"• Call Strike: `${call_strike:,.0f}`\n"
             from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 
             keyboard = [
@@ -1174,6 +1370,36 @@ class SpotHedgerBot:
             await self.start_dynamic_hedge(update, context)
         elif step == "dynamic_hedge_auto":
             await self.dynamic_hedge_auto_flow(update, context)
+        elif step == "straddle":
+            await self.start_straddle_hedge(update, context)
+        elif step == "straddle_auto":
+            await self.straddle_auto_flow(update, context)
+        elif step == "straddle_select":
+            await self.straddle_select_expiry(update, context)
+        elif step == "straddle_select_strike":
+            await self.straddle_select_strike(update, context, data)
+        elif step == "straddle_select_confirm":
+            await self.straddle_select_confirm(update, context, data)
+        elif step == "butterfly":
+            await self.start_butterfly_hedge(update, context)
+        elif step == "butterfly_auto":
+            await self.butterfly_auto_flow(update, context)
+        elif step == "butterfly_select":
+            await self.butterfly_select_expiry(update, context)
+        elif step == "butterfly_select_strike":
+            await self.butterfly_select_strike(update, context, data)
+        elif step == "butterfly_select_confirm":
+            await self.butterfly_select_confirm(update, context, data)
+        elif step == "iron_condor":
+            await self.start_iron_condor_hedge(update, context)
+        elif step == "iron_condor_auto":
+            await self.iron_condor_auto_flow(update, context)
+        elif step == "iron_condor_select":
+            await self.iron_condor_select_expiry(update, context)
+        elif step == "iron_condor_select_strike":
+            await self.iron_condor_select_strike(update, context, data)
+        elif step == "iron_condor_select_confirm":
+            await self.iron_condor_select_confirm(update, context, data)
 
         elif step == "view_hedges":
             await self.show_active_hedges(update, context)
@@ -2986,6 +3212,1050 @@ class SpotHedgerBot:
                 text, reply_markup=get_back_button(), parse_mode="Markdown"
             )
 
+    async def start_straddle_hedge(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        """Start straddle hedge wizard."""
+        query = update.callback_query
+
+        # Step 1: Ask user to choose Select or Automatic
+        text = (
+            f"🦋 *Straddle Strategy*\n\n"
+            f"Long 1 put + 1 call at same strike.\n"
+            f"Unlimited profit potential, limited risk.\n\n"
+            f"How would you like to select your options?"
+        )
+        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "🔍 Select", callback_data="hedge|straddle_select|{}"
+                    ),
+                    InlineKeyboardButton(
+                        "⚡ Automatic", callback_data="hedge|straddle_auto|{}"
+                    ),
+                ],
+                [InlineKeyboardButton("⬅️ Back", callback_data="back")],
+            ]
+        )
+        await query.edit_message_text(
+            text, reply_markup=keyboard, parse_mode="Markdown"
+        )
+
+    async def straddle_auto_flow(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        """Automatic straddle flow - pick ATM strike."""
+        query = update.callback_query
+
+        try:
+            # Get current price
+            current_price = await self.get_current_price("BTC-USDT-PERP")
+
+            # Use ATM strike (closest to current price)
+            atm_strike = round(current_price / 1000) * 1000
+
+            # Get options data
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"https://www.deribit.com/api/v2/public/get_book_summary_by_instrument_name",
+                    params={"instrument_name": f"BTC-{atm_strike}-C-25JUL25"},
+                ) as response:
+                    if response.status == 200:
+                        call_data = await response.json()
+                        call_price = call_data["result"][0]["mark_price"]
+                    else:
+                        call_price = max(0.01, current_price * 0.05)  # Fallback
+
+                async with session.get(
+                    f"https://www.deribit.com/api/v2/public/get_book_summary_by_instrument_name",
+                    params={"instrument_name": f"BTC-{atm_strike}-P-25JUL25"},
+                ) as response:
+                    if response.status == 200:
+                        put_data = await response.json()
+                        put_price = put_data["result"][0]["mark_price"]
+                    else:
+                        put_price = max(0.01, current_price * 0.05)  # Fallback
+
+            total_cost = call_price + put_price
+
+            text = (
+                f"🦋 *Straddle Strategy - Automatic*\n\n"
+                f"Strike: ${atm_strike:,.0f} (ATM)\n"
+                f"Call Price: ${call_price:.2f}\n"
+                f"Put Price: ${put_price:.2f}\n"
+                f"Total Cost: ${total_cost:.2f}\n\n"
+                f"Max Loss: ${total_cost:.2f}\n"
+                f"Breakeven: ${atm_strike - total_cost:,.0f} / ${atm_strike + total_cost:,.0f}\n"
+                f"Unlimited Profit Potential\n\n"
+                f"Strategy: Long 1 call + 1 put at same strike"
+            )
+
+            # Store hedge data
+            context.user_data["pending_hedge"] = {
+                "type": "straddle",
+                "symbol": f"BTC-{atm_strike}-C-25JUL25",
+                "qty": 1.0,
+                "price": call_price,
+                "cost": total_cost,
+                "instrument_type": "option",
+                "exchange": "Deribit",
+                "straddle_data": {
+                    "strike": atm_strike,
+                    "call_price": call_price,
+                    "put_price": put_price,
+                    "put_symbol": f"BTC-{atm_strike}-P-25JUL25",
+                },
+            }
+
+            await query.edit_message_text(
+                text,
+                reply_markup=get_confirmation_buttons("hedge"),
+                parse_mode="Markdown",
+            )
+
+        except Exception as e:
+            logger.error(f"Error in straddle auto flow: {e}")
+            text = (
+                f"🦋 *Straddle Strategy - Automatic*\n\n"
+                f"❌ Error loading options data: {str(e)}\n\n"
+                f"Try manual selection instead."
+            )
+            await query.edit_message_text(
+                text, reply_markup=get_back_button(), parse_mode="Markdown"
+            )
+
+    async def straddle_select_expiry(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        """Show expiry selection for straddle."""
+        query = update.callback_query
+
+        text = (
+            f"🦋 *Straddle Strategy - Select Expiry*\n\n"
+            f"Choose the expiry for your straddle:"
+        )
+        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "25JUL25", callback_data="hedge|straddle_select_strike|25JUL25"
+                    ),
+                    InlineKeyboardButton(
+                        "25SEP25", callback_data="hedge|straddle_select_strike|25SEP25"
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "25DEC25", callback_data="hedge|straddle_select_strike|25DEC25"
+                    ),
+                    InlineKeyboardButton(
+                        "25MAR26", callback_data="hedge|straddle_select_strike|25MAR26"
+                    ),
+                ],
+                [InlineKeyboardButton("⬅️ Back", callback_data="back")],
+            ]
+        )
+        await query.edit_message_text(
+            text, reply_markup=keyboard, parse_mode="Markdown"
+        )
+
+    async def straddle_select_strike(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, data: dict
+    ):
+        """Show strike selection for straddle."""
+        query = update.callback_query
+
+        # Handle data parsing
+        if isinstance(data, str):
+            expiry = data
+        else:
+            expiry = data.get("expiry", "25JUL25")
+
+        try:
+            # Get current price
+            current_price = await self.get_current_price("BTC-USDT-PERP")
+
+            # Get available strikes around current price
+            strikes = []
+            for i in range(-5, 6):  # 5 strikes below and above
+                strike = round((current_price + i * 1000) / 1000) * 1000
+                strikes.append(strike)
+
+            strikes = sorted(list(set(strikes)))  # Remove duplicates and sort
+
+            text = (
+                f"🦋 *Straddle Strategy - Select Strike*\n\n"
+                f"Expiry: {expiry}\n"
+                f"Current Price: ${current_price:,.2f}\n\n"
+                f"Choose the strike price for your straddle:"
+            )
+            from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+            keyboard = []
+            for strike in strikes:
+                label = f"${strike:,.0f}"
+                callback_data = f"hedge|straddle_select_confirm|{expiry}|{strike}"
+                keyboard.append(
+                    [InlineKeyboardButton(label, callback_data=callback_data)]
+                )
+
+            keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="back")])
+
+            await query.edit_message_text(
+                text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
+            )
+
+        except Exception as e:
+            logger.error(f"Error in straddle select strike: {e}")
+            text = (
+                f"🦋 *Straddle Strategy - Select Strike*\n\n"
+                f"❌ Error loading strikes: {str(e)}\n\n"
+                f"Try automatic selection instead."
+            )
+            await query.edit_message_text(
+                text, reply_markup=get_back_button(), parse_mode="Markdown"
+            )
+
+    async def straddle_select_confirm(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, data: dict
+    ):
+        """Show confirmation for straddle selection."""
+        query = update.callback_query
+
+        # Parse data
+        if isinstance(data, str):
+            parts = data.split("|")
+            if len(parts) == 2:
+                expiry = parts[0]
+                strike = float(parts[1])
+            else:
+                expiry = "25JUL25"
+                strike = 50000.0
+        else:
+            expiry = data.get("expiry", "25JUL25")
+            strike = data.get("strike", 50000.0)
+
+        try:
+            # Get current price
+            current_price = await self.get_current_price("BTC-USDT-PERP")
+
+            # Get option prices
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"https://www.deribit.com/api/v2/public/get_book_summary_by_instrument_name",
+                    params={"instrument_name": f"BTC-{strike}-C-{expiry}"},
+                ) as response:
+                    if response.status == 200:
+                        call_data = await response.json()
+                        call_price = call_data["result"][0]["mark_price"]
+                    else:
+                        call_price = max(0.01, abs(current_price - strike) * 0.1)
+
+                async with session.get(
+                    f"https://www.deribit.com/api/v2/public/get_book_summary_by_instrument_name",
+                    params={"instrument_name": f"BTC-{strike}-P-{expiry}"},
+                ) as response:
+                    if response.status == 200:
+                        put_data = await response.json()
+                        put_price = put_data["result"][0]["mark_price"]
+                    else:
+                        put_price = max(0.01, abs(current_price - strike) * 0.1)
+
+            total_cost = call_price + put_price
+
+            text = (
+                f"🦋 *Straddle Strategy - Confirmation*\n\n"
+                f"Strike: ${strike:,.0f}\n"
+                f"Expiry: {expiry}\n"
+                f"Call Price: ${call_price:.2f}\n"
+                f"Put Price: ${put_price:.2f}\n"
+                f"Total Cost: ${total_cost:.2f}\n\n"
+                f"Max Loss: ${total_cost:.2f}\n"
+                f"Breakeven: ${strike - total_cost:,.0f} / ${strike + total_cost:,.0f}\n"
+                f"Unlimited Profit Potential\n\n"
+                f"Strategy: Long 1 call + 1 put at same strike"
+            )
+
+            # Store hedge data
+            context.user_data["pending_hedge"] = {
+                "type": "straddle",
+                "symbol": f"BTC-{strike}-C-{expiry}",
+                "qty": 1.0,
+                "price": call_price,
+                "cost": total_cost,
+                "instrument_type": "option",
+                "exchange": "Deribit",
+                "straddle_data": {
+                    "strike": strike,
+                    "call_price": call_price,
+                    "put_price": put_price,
+                    "put_symbol": f"BTC-{strike}-P-{expiry}",
+                    "expiry": expiry,
+                },
+            }
+
+            await query.edit_message_text(
+                text,
+                reply_markup=get_confirmation_buttons("hedge"),
+                parse_mode="Markdown",
+            )
+
+        except Exception as e:
+            logger.error(f"Error in straddle select confirm: {e}")
+            text = (
+                f"🦋 *Straddle Strategy - Confirmation*\n\n"
+                f"❌ Error loading option prices: {str(e)}\n\n"
+                f"Try automatic selection instead."
+            )
+            await query.edit_message_text(
+                text, reply_markup=get_back_button(), parse_mode="Markdown"
+            )
+
+    async def start_butterfly_hedge(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        """Start butterfly hedge wizard."""
+        query = update.callback_query
+
+        # Step 1: Ask user to choose Select or Automatic
+        text = (
+            f"🦋 *Butterfly Strategy*\n\n"
+            f"Long 1 ITM, short 2 ATM, long 1 OTM.\n"
+            f"Limited profit and loss.\n\n"
+            f"How would you like to select your options?"
+        )
+        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "🔍 Select", callback_data="hedge|butterfly_select|{}"
+                    ),
+                    InlineKeyboardButton(
+                        "⚡ Automatic", callback_data="hedge|butterfly_auto|{}"
+                    ),
+                ],
+                [InlineKeyboardButton("⬅️ Back", callback_data="back")],
+            ]
+        )
+        await query.edit_message_text(
+            text, reply_markup=keyboard, parse_mode="Markdown"
+        )
+
+    async def butterfly_auto_flow(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        """Automatic butterfly flow - pick strikes around current price."""
+        query = update.callback_query
+
+        try:
+            # Get current price
+            current_price = await self.get_current_price("BTC-USDT-PERP")
+
+            # Use strikes around current price
+            atm_strike = round(current_price / 1000) * 1000
+            lower_strike = atm_strike - 2000
+            upper_strike = atm_strike + 2000
+
+            # Get option prices
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"https://www.deribit.com/api/v2/public/get_book_summary_by_instrument_name",
+                    params={"instrument_name": f"BTC-{lower_strike}-C-25JUL25"},
+                ) as response:
+                    if response.status == 200:
+                        lower_data = await response.json()
+                        lower_price = lower_data["result"][0]["mark_price"]
+                    else:
+                        lower_price = max(0.01, (current_price - lower_strike) * 0.1)
+
+                async with session.get(
+                    f"https://www.deribit.com/api/v2/public/get_book_summary_by_instrument_name",
+                    params={"instrument_name": f"BTC-{atm_strike}-C-25JUL25"},
+                ) as response:
+                    if response.status == 200:
+                        middle_data = await response.json()
+                        middle_price = middle_data["result"][0]["mark_price"]
+                    else:
+                        middle_price = max(0.01, abs(current_price - atm_strike) * 0.1)
+
+                async with session.get(
+                    f"https://www.deribit.com/api/v2/public/get_book_summary_by_instrument_name",
+                    params={"instrument_name": f"BTC-{upper_strike}-C-25JUL25"},
+                ) as response:
+                    if response.status == 200:
+                        upper_data = await response.json()
+                        upper_price = upper_data["result"][0]["mark_price"]
+                    else:
+                        upper_price = max(0.01, (upper_strike - current_price) * 0.1)
+
+            total_cost = lower_price - 2 * middle_price + upper_price
+            max_profit = atm_strike - lower_strike - total_cost
+
+            text = (
+                f"🦋 *Butterfly Strategy - Automatic*\n\n"
+                f"Lower Strike: ${lower_strike:,.0f} (ITM)\n"
+                f"Middle Strike: ${atm_strike:,.0f} (ATM)\n"
+                f"Upper Strike: ${upper_strike:,.0f} (OTM)\n\n"
+                f"Lower Price: ${lower_price:.2f}\n"
+                f"Middle Price: ${middle_price:.2f}\n"
+                f"Upper Price: ${upper_price:.2f}\n"
+                f"Total Cost: ${total_cost:.2f}\n\n"
+                f"Max Profit: ${max_profit:.2f}\n"
+                f"Max Loss: ${total_cost:.2f}\n"
+                f"Breakeven: ${lower_strike + total_cost:,.0f} / ${upper_strike - total_cost:,.0f}\n\n"
+                f"Strategy: Long 1 ITM call, short 2 ATM calls, long 1 OTM call"
+            )
+
+            # Store hedge data
+            context.user_data["pending_hedge"] = {
+                "type": "butterfly",
+                "symbol": f"BTC-{lower_strike}-C-25JUL25",
+                "qty": 1.0,
+                "price": lower_price,
+                "cost": total_cost,
+                "instrument_type": "option",
+                "exchange": "Deribit",
+                "butterfly_data": {
+                    "lower_strike": lower_strike,
+                    "middle_strike": atm_strike,
+                    "upper_strike": upper_strike,
+                    "lower_price": lower_price,
+                    "middle_price": middle_price,
+                    "upper_price": upper_price,
+                    "middle_symbol": f"BTC-{atm_strike}-C-25JUL25",
+                    "upper_symbol": f"BTC-{upper_strike}-C-25JUL25",
+                },
+            }
+
+            await query.edit_message_text(
+                text,
+                reply_markup=get_confirmation_buttons("hedge"),
+                parse_mode="Markdown",
+            )
+
+        except Exception as e:
+            logger.error(f"Error in butterfly auto flow: {e}")
+            text = (
+                f"🦋 *Butterfly Strategy - Automatic*\n\n"
+                f"❌ Error loading options data: {str(e)}\n\n"
+                f"Try manual selection instead."
+            )
+            await query.edit_message_text(
+                text, reply_markup=get_back_button(), parse_mode="Markdown"
+            )
+
+    async def butterfly_select_expiry(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        """Show expiry selection for butterfly."""
+        query = update.callback_query
+
+        text = (
+            f"🦋 *Butterfly Strategy - Select Expiry*\n\n"
+            f"Choose the expiry for your butterfly:"
+        )
+        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "25JUL25", callback_data="hedge|butterfly_select_strike|25JUL25"
+                    ),
+                    InlineKeyboardButton(
+                        "25SEP25", callback_data="hedge|butterfly_select_strike|25SEP25"
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "25DEC25", callback_data="hedge|butterfly_select_strike|25DEC25"
+                    ),
+                    InlineKeyboardButton(
+                        "25MAR26", callback_data="hedge|butterfly_select_strike|25MAR26"
+                    ),
+                ],
+                [InlineKeyboardButton("⬅️ Back", callback_data="back")],
+            ]
+        )
+        await query.edit_message_text(
+            text, reply_markup=keyboard, parse_mode="Markdown"
+        )
+
+    async def butterfly_select_strike(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, data: dict
+    ):
+        """Show strike selection for butterfly."""
+        query = update.callback_query
+
+        # Handle data parsing
+        if isinstance(data, str):
+            expiry = data
+        else:
+            expiry = data.get("expiry", "25JUL25")
+
+        try:
+            # Get current price
+            current_price = await self.get_current_price("BTC-USDT-PERP")
+
+            # Get available strikes around current price
+            strikes = []
+            for i in range(-5, 6):  # 5 strikes below and above
+                strike = round((current_price + i * 1000) / 1000) * 1000
+                strikes.append(strike)
+
+            strikes = sorted(list(set(strikes)))  # Remove duplicates and sort
+
+            text = (
+                f"🦋 *Butterfly Strategy - Select Middle Strike*\n\n"
+                f"Expiry: {expiry}\n"
+                f"Current Price: ${current_price:,.2f}\n\n"
+                f"Choose the middle strike (ATM) for your butterfly:"
+            )
+            from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+            keyboard = []
+            for strike in strikes:
+                label = f"${strike:,.0f}"
+                callback_data = f"hedge|butterfly_select_confirm|{expiry}|{strike}"
+                keyboard.append(
+                    [InlineKeyboardButton(label, callback_data=callback_data)]
+                )
+
+            keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="back")])
+
+            await query.edit_message_text(
+                text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
+            )
+
+        except Exception as e:
+            logger.error(f"Error in butterfly select strike: {e}")
+            text = (
+                f"🦋 *Butterfly Strategy - Select Strike*\n\n"
+                f"❌ Error loading strikes: {str(e)}\n\n"
+                f"Try automatic selection instead."
+            )
+            await query.edit_message_text(
+                text, reply_markup=get_back_button(), parse_mode="Markdown"
+            )
+
+    async def butterfly_select_confirm(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, data: dict
+    ):
+        """Show confirmation for butterfly selection."""
+        query = update.callback_query
+
+        # Parse data
+        if isinstance(data, str):
+            parts = data.split("|")
+            if len(parts) == 2:
+                expiry = parts[0]
+                middle_strike = float(parts[1])
+            else:
+                expiry = "25JUL25"
+                middle_strike = 50000.0
+        else:
+            expiry = data.get("expiry", "25JUL25")
+            middle_strike = data.get("strike", 50000.0)
+
+        try:
+            # Get current price
+            current_price = await self.get_current_price("BTC-USDT-PERP")
+
+            # Calculate other strikes
+            lower_strike = middle_strike - 2000
+            upper_strike = middle_strike + 2000
+
+            # Get option prices
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"https://www.deribit.com/api/v2/public/get_book_summary_by_instrument_name",
+                    params={"instrument_name": f"BTC-{lower_strike}-C-{expiry}"},
+                ) as response:
+                    if response.status == 200:
+                        lower_data = await response.json()
+                        lower_price = lower_data["result"][0]["mark_price"]
+                    else:
+                        lower_price = max(0.01, (current_price - lower_strike) * 0.1)
+
+                async with session.get(
+                    f"https://www.deribit.com/api/v2/public/get_book_summary_by_instrument_name",
+                    params={"instrument_name": f"BTC-{middle_strike}-C-{expiry}"},
+                ) as response:
+                    if response.status == 200:
+                        middle_data = await response.json()
+                        middle_price = middle_data["result"][0]["mark_price"]
+                    else:
+                        middle_price = max(
+                            0.01, abs(current_price - middle_strike) * 0.1
+                        )
+
+                async with session.get(
+                    f"https://www.deribit.com/api/v2/public/get_book_summary_by_instrument_name",
+                    params={"instrument_name": f"BTC-{upper_strike}-C-{expiry}"},
+                ) as response:
+                    if response.status == 200:
+                        upper_data = await response.json()
+                        upper_price = upper_data["result"][0]["mark_price"]
+                    else:
+                        upper_price = max(0.01, (upper_strike - current_price) * 0.1)
+
+            total_cost = lower_price - 2 * middle_price + upper_price
+            max_profit = middle_strike - lower_strike - total_cost
+
+            text = (
+                f"🦋 *Butterfly Strategy - Confirmation*\n\n"
+                f"Lower Strike: ${lower_strike:,.0f} (ITM)\n"
+                f"Middle Strike: ${middle_strike:,.0f} (ATM)\n"
+                f"Upper Strike: ${upper_strike:,.0f} (OTM)\n\n"
+                f"Lower Price: ${lower_price:.2f}\n"
+                f"Middle Price: ${middle_price:.2f}\n"
+                f"Upper Price: ${upper_price:.2f}\n"
+                f"Total Cost: ${total_cost:.2f}\n\n"
+                f"Max Profit: ${max_profit:.2f}\n"
+                f"Max Loss: ${total_cost:.2f}\n"
+                f"Breakeven: ${lower_strike + total_cost:,.0f} / ${upper_strike - total_cost:,.0f}\n\n"
+                f"Strategy: Long 1 ITM call, short 2 ATM calls, long 1 OTM call"
+            )
+
+            # Store hedge data
+            context.user_data["pending_hedge"] = {
+                "type": "butterfly",
+                "symbol": f"BTC-{lower_strike}-C-{expiry}",
+                "qty": 1.0,
+                "price": lower_price,
+                "cost": total_cost,
+                "instrument_type": "option",
+                "exchange": "Deribit",
+                "butterfly_data": {
+                    "lower_strike": lower_strike,
+                    "middle_strike": middle_strike,
+                    "upper_strike": upper_strike,
+                    "lower_price": lower_price,
+                    "middle_price": middle_price,
+                    "upper_price": upper_price,
+                    "middle_symbol": f"BTC-{middle_strike}-C-{expiry}",
+                    "upper_symbol": f"BTC-{upper_strike}-C-{expiry}",
+                    "expiry": expiry,
+                },
+            }
+
+            await query.edit_message_text(
+                text,
+                reply_markup=get_confirmation_buttons("hedge"),
+                parse_mode="Markdown",
+            )
+
+        except Exception as e:
+            logger.error(f"Error in butterfly select confirm: {e}")
+            text = (
+                f"🦋 *Butterfly Strategy - Confirmation*\n\n"
+                f"❌ Error loading option prices: {str(e)}\n\n"
+                f"Try automatic selection instead."
+            )
+            await query.edit_message_text(
+                text, reply_markup=get_back_button(), parse_mode="Markdown"
+            )
+
+    async def start_iron_condor_hedge(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        """Start iron condor hedge wizard."""
+        query = update.callback_query
+
+        # Step 1: Ask user to choose Select or Automatic
+        text = (
+            f"🦅 *Iron Condor Strategy*\n\n"
+            f"Short put spread + short call spread.\n"
+            f"Defined risk and reward.\n\n"
+            f"How would you like to select your options?"
+        )
+        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "🔍 Select", callback_data="hedge|iron_condor_select|{}"
+                    ),
+                    InlineKeyboardButton(
+                        "⚡ Automatic", callback_data="hedge|iron_condor_auto|{}"
+                    ),
+                ],
+                [InlineKeyboardButton("⬅️ Back", callback_data="back")],
+            ]
+        )
+        await query.edit_message_text(
+            text, reply_markup=keyboard, parse_mode="Markdown"
+        )
+
+    async def iron_condor_auto_flow(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        """Automatic iron condor flow - pick strikes around current price."""
+        query = update.callback_query
+
+        try:
+            # Get current price
+            current_price = await self.get_current_price("BTC-USDT-PERP")
+
+            # Use strikes around current price
+            atm_strike = round(current_price / 1000) * 1000
+            put_lower = atm_strike - 3000
+            put_upper = atm_strike - 1000
+            call_lower = atm_strike + 1000
+            call_upper = atm_strike + 3000
+
+            # Get option prices
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"https://www.deribit.com/api/v2/public/get_book_summary_by_instrument_name",
+                    params={"instrument_name": f"BTC-{put_lower}-P-25JUL25"},
+                ) as response:
+                    if response.status == 200:
+                        put_lower_data = await response.json()
+                        put_lower_price = put_lower_data["result"][0]["mark_price"]
+                    else:
+                        put_lower_price = max(0.01, (put_lower - current_price) * 0.1)
+
+                async with session.get(
+                    f"https://www.deribit.com/api/v2/public/get_book_summary_by_instrument_name",
+                    params={"instrument_name": f"BTC-{put_upper}-P-25JUL25"},
+                ) as response:
+                    if response.status == 200:
+                        put_upper_data = await response.json()
+                        put_upper_price = put_upper_data["result"][0]["mark_price"]
+                    else:
+                        put_upper_price = max(0.01, (put_upper - current_price) * 0.1)
+
+                async with session.get(
+                    f"https://www.deribit.com/api/v2/public/get_book_summary_by_instrument_name",
+                    params={"instrument_name": f"BTC-{call_lower}-C-25JUL25"},
+                ) as response:
+                    if response.status == 200:
+                        call_lower_data = await response.json()
+                        call_lower_price = call_lower_data["result"][0]["mark_price"]
+                    else:
+                        call_lower_price = max(0.01, (current_price - call_lower) * 0.1)
+
+                async with session.get(
+                    f"https://www.deribit.com/api/v2/public/get_book_summary_by_instrument_name",
+                    params={"instrument_name": f"BTC-{call_upper}-C-25JUL25"},
+                ) as response:
+                    if response.status == 200:
+                        call_upper_data = await response.json()
+                        call_upper_price = call_upper_data["result"][0]["mark_price"]
+                    else:
+                        call_upper_price = max(0.01, (call_upper - current_price) * 0.1)
+
+            net_credit = (
+                put_lower_price - put_upper_price + call_lower_price - call_upper_price
+            )
+            max_profit = net_credit
+            max_loss_put_side = put_upper - put_lower - net_credit
+            max_loss_call_side = call_upper - call_lower - net_credit
+            max_loss = max(max_loss_put_side, max_loss_call_side)
+
+            text = (
+                f"🦅 *Iron Condor Strategy - Automatic*\n\n"
+                f"Put Lower: ${put_lower:,.0f} (Short)\n"
+                f"Put Upper: ${put_upper:,.0f} (Long)\n"
+                f"Call Lower: ${call_lower:,.0f} (Short)\n"
+                f"Call Upper: ${call_upper:,.0f} (Long)\n\n"
+                f"Put Lower Price: ${put_lower_price:.2f}\n"
+                f"Put Upper Price: ${put_upper_price:.2f}\n"
+                f"Call Lower Price: ${call_lower_price:.2f}\n"
+                f"Call Upper Price: ${call_upper_price:.2f}\n"
+                f"Net Credit: ${net_credit:.2f}\n\n"
+                f"Max Profit: ${max_profit:.2f}\n"
+                f"Max Loss: ${max_loss:.2f}\n"
+                f"Breakeven: ${put_lower + net_credit:,.0f} / ${call_lower - net_credit:,.0f}\n\n"
+                f"Strategy: Short put spread + short call spread"
+            )
+
+            # Store hedge data
+            context.user_data["pending_hedge"] = {
+                "type": "iron_condor",
+                "symbol": f"BTC-{put_lower}-P-25JUL25",
+                "qty": -1.0,  # Short
+                "price": put_lower_price,
+                "cost": net_credit,
+                "instrument_type": "option",
+                "exchange": "Deribit",
+                "iron_condor_data": {
+                    "put_lower": put_lower,
+                    "put_upper": put_upper,
+                    "call_lower": call_lower,
+                    "call_upper": call_upper,
+                    "put_lower_price": put_lower_price,
+                    "put_upper_price": put_upper_price,
+                    "call_lower_price": call_lower_price,
+                    "call_upper_price": call_upper_price,
+                    "put_upper_symbol": f"BTC-{put_upper}-P-25JUL25",
+                    "call_lower_symbol": f"BTC-{call_lower}-C-25JUL25",
+                    "call_upper_symbol": f"BTC-{call_upper}-C-25JUL25",
+                },
+            }
+
+            await query.edit_message_text(
+                text,
+                reply_markup=get_confirmation_buttons("hedge"),
+                parse_mode="Markdown",
+            )
+
+        except Exception as e:
+            logger.error(f"Error in iron condor auto flow: {e}")
+            text = (
+                f"🦅 *Iron Condor Strategy - Automatic*\n\n"
+                f"❌ Error loading options data: {str(e)}\n\n"
+                f"Try manual selection instead."
+            )
+            await query.edit_message_text(
+                text, reply_markup=get_back_button(), parse_mode="Markdown"
+            )
+
+    async def iron_condor_select_expiry(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        """Show expiry selection for iron condor."""
+        query = update.callback_query
+
+        text = (
+            f"🦅 *Iron Condor Strategy - Select Expiry*\n\n"
+            f"Choose the expiry for your iron condor:"
+        )
+        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "25JUL25",
+                        callback_data="hedge|iron_condor_select_strike|25JUL25",
+                    ),
+                    InlineKeyboardButton(
+                        "25SEP25",
+                        callback_data="hedge|iron_condor_select_strike|25SEP25",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "25DEC25",
+                        callback_data="hedge|iron_condor_select_strike|25DEC25",
+                    ),
+                    InlineKeyboardButton(
+                        "25MAR26",
+                        callback_data="hedge|iron_condor_select_strike|25MAR26",
+                    ),
+                ],
+                [InlineKeyboardButton("⬅️ Back", callback_data="back")],
+            ]
+        )
+        await query.edit_message_text(
+            text, reply_markup=keyboard, parse_mode="Markdown"
+        )
+
+    async def iron_condor_select_strike(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, data: dict
+    ):
+        """Show strike selection for iron condor."""
+        query = update.callback_query
+
+        # Handle data parsing
+        if isinstance(data, str):
+            expiry = data
+        else:
+            expiry = data.get("expiry", "25JUL25")
+
+        try:
+            # Get current price
+            current_price = await self.get_current_price("BTC-USDT-PERP")
+
+            # Get available strikes around current price
+            strikes = []
+            for i in range(-5, 6):  # 5 strikes below and above
+                strike = round((current_price + i * 1000) / 1000) * 1000
+                strikes.append(strike)
+
+            strikes = sorted(list(set(strikes)))  # Remove duplicates and sort
+
+            text = (
+                f"🦅 *Iron Condor Strategy - Select Middle Strike*\n\n"
+                f"Expiry: {expiry}\n"
+                f"Current Price: ${current_price:,.2f}\n\n"
+                f"Choose the middle strike (ATM) for your iron condor:"
+            )
+            from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+            keyboard = []
+            for strike in strikes:
+                label = f"${strike:,.0f}"
+                callback_data = f"hedge|iron_condor_select_confirm|{expiry}|{strike}"
+                keyboard.append(
+                    [InlineKeyboardButton(label, callback_data=callback_data)]
+                )
+
+            keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="back")])
+
+            await query.edit_message_text(
+                text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
+            )
+
+        except Exception as e:
+            logger.error(f"Error in iron condor select strike: {e}")
+            text = (
+                f"🦅 *Iron Condor Strategy - Select Strike*\n\n"
+                f"❌ Error loading strikes: {str(e)}\n\n"
+                f"Try automatic selection instead."
+            )
+            await query.edit_message_text(
+                text, reply_markup=get_back_button(), parse_mode="Markdown"
+            )
+
+    async def iron_condor_select_confirm(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, data: dict
+    ):
+        """Show confirmation for iron condor selection."""
+        query = update.callback_query
+
+        # Parse data
+        if isinstance(data, str):
+            parts = data.split("|")
+            if len(parts) == 2:
+                expiry = parts[0]
+                middle_strike = float(parts[1])
+            else:
+                expiry = "25JUL25"
+                middle_strike = 50000.0
+        else:
+            expiry = data.get("expiry", "25JUL25")
+            middle_strike = data.get("strike", 50000.0)
+
+        try:
+            # Get current price
+            current_price = await self.get_current_price("BTC-USDT-PERP")
+
+            # Calculate other strikes
+            put_lower = middle_strike - 3000
+            put_upper = middle_strike - 1000
+            call_lower = middle_strike + 1000
+            call_upper = middle_strike + 3000
+
+            # Get option prices
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"https://www.deribit.com/api/v2/public/get_book_summary_by_instrument_name",
+                    params={"instrument_name": f"BTC-{put_lower}-P-{expiry}"},
+                ) as response:
+                    if response.status == 200:
+                        put_lower_data = await response.json()
+                        put_lower_price = put_lower_data["result"][0]["mark_price"]
+                    else:
+                        put_lower_price = max(0.01, (put_lower - current_price) * 0.1)
+
+                async with session.get(
+                    f"https://www.deribit.com/api/v2/public/get_book_summary_by_instrument_name",
+                    params={"instrument_name": f"BTC-{put_upper}-P-{expiry}"},
+                ) as response:
+                    if response.status == 200:
+                        put_upper_data = await response.json()
+                        put_upper_price = put_upper_data["result"][0]["mark_price"]
+                    else:
+                        put_upper_price = max(0.01, (put_upper - current_price) * 0.1)
+
+                async with session.get(
+                    f"https://www.deribit.com/api/v2/public/get_book_summary_by_instrument_name",
+                    params={"instrument_name": f"BTC-{call_lower}-C-{expiry}"},
+                ) as response:
+                    if response.status == 200:
+                        call_lower_data = await response.json()
+                        call_lower_price = call_lower_data["result"][0]["mark_price"]
+                    else:
+                        call_lower_price = max(0.01, (current_price - call_lower) * 0.1)
+
+                async with session.get(
+                    f"https://www.deribit.com/api/v2/public/get_book_summary_by_instrument_name",
+                    params={"instrument_name": f"BTC-{call_upper}-C-{expiry}"},
+                ) as response:
+                    if response.status == 200:
+                        call_upper_data = await response.json()
+                        call_upper_price = call_upper_data["result"][0]["mark_price"]
+                    else:
+                        call_upper_price = max(0.01, (call_upper - current_price) * 0.1)
+
+            net_credit = (
+                put_lower_price - put_upper_price + call_lower_price - call_upper_price
+            )
+            max_profit = net_credit
+            max_loss_put_side = put_upper - put_lower - net_credit
+            max_loss_call_side = call_upper - call_lower - net_credit
+            max_loss = max(max_loss_put_side, max_loss_call_side)
+
+            text = (
+                f"🦅 *Iron Condor Strategy - Confirmation*\n\n"
+                f"Put Lower: ${put_lower:,.0f} (Short)\n"
+                f"Put Upper: ${put_upper:,.0f} (Long)\n"
+                f"Call Lower: ${call_lower:,.0f} (Short)\n"
+                f"Call Upper: ${call_upper:,.0f} (Long)\n\n"
+                f"Put Lower Price: ${put_lower_price:.2f}\n"
+                f"Put Upper Price: ${put_upper_price:.2f}\n"
+                f"Call Lower Price: ${call_lower_price:.2f}\n"
+                f"Call Upper Price: ${call_upper_price:.2f}\n"
+                f"Net Credit: ${net_credit:.2f}\n\n"
+                f"Max Profit: ${max_profit:.2f}\n"
+                f"Max Loss: ${max_loss:.2f}\n"
+                f"Breakeven: ${put_lower + net_credit:,.0f} / ${call_lower - net_credit:,.0f}\n\n"
+                f"Strategy: Short put spread + short call spread"
+            )
+
+            # Store hedge data
+            context.user_data["pending_hedge"] = {
+                "type": "iron_condor",
+                "symbol": f"BTC-{put_lower}-P-{expiry}",
+                "qty": -1.0,  # Short
+                "price": put_lower_price,
+                "cost": net_credit,
+                "instrument_type": "option",
+                "exchange": "Deribit",
+                "iron_condor_data": {
+                    "put_lower": put_lower,
+                    "put_upper": put_upper,
+                    "call_lower": call_lower,
+                    "call_upper": call_upper,
+                    "put_lower_price": put_lower_price,
+                    "put_upper_price": put_upper_price,
+                    "call_lower_price": call_lower_price,
+                    "call_upper_price": call_upper_price,
+                    "put_upper_symbol": f"BTC-{put_upper}-P-{expiry}",
+                    "call_lower_symbol": f"BTC-{call_lower}-C-{expiry}",
+                    "call_upper_symbol": f"BTC-{call_upper}-C-{expiry}",
+                    "expiry": expiry,
+                },
+            }
+
+            await query.edit_message_text(
+                text,
+                reply_markup=get_confirmation_buttons("hedge"),
+                parse_mode="Markdown",
+            )
+
+        except Exception as e:
+            logger.error(f"Error in iron condor select confirm: {e}")
+            text = (
+                f"🦅 *Iron Condor Strategy - Confirmation*\n\n"
+                f"❌ Error loading option prices: {str(e)}\n\n"
+                f"Try automatic selection instead."
+            )
+            await query.edit_message_text(
+                text, reply_markup=get_back_button(), parse_mode="Markdown"
+            )
+
     async def show_active_hedges(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ):
@@ -3075,6 +4345,69 @@ class SpotHedgerBot:
                     self.portfolio.update_fill(
                         call.symbol, call_qty, call.mid_price, "option", "Deribit"
                     )
+            # For straddle, remove both call and put
+            elif hedge_type == "straddle" and "straddle_data" in removed:
+                straddle_data = removed["straddle_data"]
+                put_symbol = straddle_data.get("put_symbol")
+                put_price = straddle_data.get("put_price", 0)
+                # Remove call position
+                self.portfolio.update_fill(
+                    symbol, -qty, removed.get("price", 0), instrument_type, exchange
+                )
+                # Remove put position
+                if put_symbol:
+                    self.portfolio.update_fill(
+                        put_symbol, -qty, put_price, "option", "Deribit"
+                    )
+            # For butterfly, remove all 3 legs
+            elif hedge_type == "butterfly" and "butterfly_data" in removed:
+                butterfly_data = removed["butterfly_data"]
+                middle_symbol = butterfly_data.get("middle_symbol")
+                upper_symbol = butterfly_data.get("upper_symbol")
+                middle_price = butterfly_data.get("middle_price", 0)
+                upper_price = butterfly_data.get("upper_price", 0)
+                # Remove lower leg (long)
+                self.portfolio.update_fill(
+                    symbol, -qty, removed.get("price", 0), instrument_type, exchange
+                )
+                # Remove middle leg (short 2x)
+                if middle_symbol:
+                    self.portfolio.update_fill(
+                        middle_symbol, 2 * qty, middle_price, "option", "Deribit"
+                    )
+                # Remove upper leg (long)
+                if upper_symbol:
+                    self.portfolio.update_fill(
+                        upper_symbol, -qty, upper_price, "option", "Deribit"
+                    )
+            # For iron condor, remove all 4 legs
+            elif hedge_type == "iron_condor" and "iron_condor_data" in removed:
+                iron_condor_data = removed["iron_condor_data"]
+                put_upper_symbol = iron_condor_data.get("put_upper_symbol")
+                call_lower_symbol = iron_condor_data.get("call_lower_symbol")
+                call_upper_symbol = iron_condor_data.get("call_upper_symbol")
+                put_upper_price = iron_condor_data.get("put_upper_price", 0)
+                call_lower_price = iron_condor_data.get("call_lower_price", 0)
+                call_upper_price = iron_condor_data.get("call_upper_price", 0)
+                # Remove put lower leg (short)
+                self.portfolio.update_fill(
+                    symbol, -qty, removed.get("price", 0), instrument_type, exchange
+                )
+                # Remove put upper leg (long)
+                if put_upper_symbol:
+                    self.portfolio.update_fill(
+                        put_upper_symbol, qty, put_upper_price, "option", "Deribit"
+                    )
+                # Remove call lower leg (short)
+                if call_lower_symbol:
+                    self.portfolio.update_fill(
+                        call_lower_symbol, -qty, call_lower_price, "option", "Deribit"
+                    )
+                # Remove call upper leg (long)
+                if call_upper_symbol:
+                    self.portfolio.update_fill(
+                        call_upper_symbol, qty, call_upper_price, "option", "Deribit"
+                    )
             else:
                 # Remove the position by reversing the fill
                 self.portfolio.update_fill(
@@ -3121,18 +4454,28 @@ class SpotHedgerBot:
             and h["price"] == price
             and h["exchange"] == hedge.get("exchange")
         ):
-            self.active_hedges.append(
-                {
-                    "type": hedge_type,
-                    "symbol": symbol,
-                    "qty": qty,
-                    "price": price,
-                    "instrument_type": hedge.get("instrument_type"),
-                    "exchange": hedge.get("exchange"),
-                    "target_delta": hedge.get("target_delta"),
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                }
-            )
+            hedge_entry = {
+                "type": hedge_type,
+                "symbol": symbol,
+                "qty": qty,
+                "price": price,
+                "instrument_type": hedge.get("instrument_type"),
+                "exchange": hedge.get("exchange"),
+                "target_delta": hedge.get("target_delta"),
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+
+            # Add strategy-specific data
+            if hedge_type == "straddle" and "straddle_data" in hedge:
+                hedge_entry["straddle_data"] = hedge["straddle_data"]
+            elif hedge_type == "butterfly" and "butterfly_data" in hedge:
+                hedge_entry["butterfly_data"] = hedge["butterfly_data"]
+            elif hedge_type == "iron_condor" and "iron_condor_data" in hedge:
+                hedge_entry["iron_condor_data"] = hedge["iron_condor_data"]
+            elif hedge_type == "collar" and "collar_data" in hedge:
+                hedge_entry["collar_data"] = hedge["collar_data"]
+
+            self.active_hedges.append(hedge_entry)
 
         if hedge_type == "perp_delta_neutral":
             # Execute the hedge
@@ -3178,6 +4521,75 @@ class SpotHedgerBot:
                 symbol, qty, price, hedge.get("instrument_type"), hedge.get("exchange")
             )
             text = f"✅ *Dynamic Hedge Executed*\n\n{symbol}: {qty:+.4f} @ ${price:.2f}\n\nPortfolio dynamically hedged with optimal options strategy."
+        elif hedge_type == "straddle":
+            # Execute straddle hedge (both call and put)
+            straddle_data = hedge.get("straddle_data", {})
+            put_symbol = straddle_data.get("put_symbol")
+            put_price = straddle_data.get("put_price", 0)
+
+            # Add call position
+            self.portfolio.update_fill(
+                symbol, qty, price, hedge.get("instrument_type"), hedge.get("exchange")
+            )
+            # Add put position
+            if put_symbol:
+                self.portfolio.update_fill(
+                    put_symbol, qty, put_price, "option", "Deribit"
+                )
+            text = f"✅ *Straddle Strategy Executed*\n\nCall: {symbol} {qty:+.4f} @ ${price:.2f}\nPut: {put_symbol} {qty:+.4f} @ ${put_price:.2f}\n\nUnlimited profit potential with defined risk."
+        elif hedge_type == "butterfly":
+            # Execute butterfly hedge (3 legs)
+            butterfly_data = hedge.get("butterfly_data", {})
+            middle_symbol = butterfly_data.get("middle_symbol")
+            upper_symbol = butterfly_data.get("upper_symbol")
+            middle_price = butterfly_data.get("middle_price", 0)
+            upper_price = butterfly_data.get("upper_price", 0)
+
+            # Add lower leg (long)
+            self.portfolio.update_fill(
+                symbol, qty, price, hedge.get("instrument_type"), hedge.get("exchange")
+            )
+            # Add middle leg (short 2x)
+            if middle_symbol:
+                self.portfolio.update_fill(
+                    middle_symbol, -2 * qty, middle_price, "option", "Deribit"
+                )
+            # Add upper leg (long)
+            if upper_symbol:
+                self.portfolio.update_fill(
+                    upper_symbol, qty, upper_price, "option", "Deribit"
+                )
+            text = f"✅ *Butterfly Strategy Executed*\n\nLower: {symbol} {qty:+.4f} @ ${price:.2f}\nMiddle: {middle_symbol} {-2*qty:+.4f} @ ${middle_price:.2f}\nUpper: {upper_symbol} {qty:+.4f} @ ${upper_price:.2f}\n\nLimited profit and loss profile."
+        elif hedge_type == "iron_condor":
+            # Execute iron condor hedge (4 legs)
+            iron_condor_data = hedge.get("iron_condor_data", {})
+            put_upper_symbol = iron_condor_data.get("put_upper_symbol")
+            call_lower_symbol = iron_condor_data.get("call_lower_symbol")
+            call_upper_symbol = iron_condor_data.get("call_upper_symbol")
+            put_upper_price = iron_condor_data.get("put_upper_price", 0)
+            call_lower_price = iron_condor_data.get("call_lower_price", 0)
+            call_upper_price = iron_condor_data.get("call_upper_price", 0)
+
+            # Add put lower leg (short)
+            self.portfolio.update_fill(
+                symbol, qty, price, hedge.get("instrument_type"), hedge.get("exchange")
+            )
+            # Add put upper leg (long)
+            if put_upper_symbol:
+                self.portfolio.update_fill(
+                    put_upper_symbol, -qty, put_upper_price, "option", "Deribit"
+                )
+            # Add call lower leg (short)
+            if call_lower_symbol:
+                self.portfolio.update_fill(
+                    call_lower_symbol, qty, call_lower_price, "option", "Deribit"
+                )
+            # Add call upper leg (long)
+            if call_upper_symbol:
+                self.portfolio.update_fill(
+                    call_upper_symbol, -qty, call_upper_price, "option", "Deribit"
+                )
+            text = f"✅ *Iron Condor Strategy Executed*\n\nPut Lower: {symbol} {qty:+.4f} @ ${price:.2f}\nPut Upper: {put_upper_symbol} {-qty:+.4f} @ ${put_upper_price:.2f}\nCall Lower: {call_lower_symbol} {qty:+.4f} @ ${call_lower_price:.2f}\nCall Upper: {call_upper_symbol} {-qty:+.4f} @ ${call_upper_price:.2f}\n\nDefined risk and reward profile."
         else:
             text = "❌ Unknown hedge type."
 
@@ -3302,8 +4714,74 @@ class SpotHedgerBot:
             text = "*Active Hedges:*\n\n"
             buttons = []
             for i, hedge in enumerate(hedges):
-                desc = hedge.get("desc", hedge.get("symbol", f"Hedge {i+1}"))
-                text += f"{i+1}. {desc}\n"
+                hedge_type = hedge.get("type", "unknown")
+                symbol = hedge.get("symbol", "")
+                qty = hedge.get("qty", 0.0)
+                price = hedge.get("price", 0.0)
+                cost = hedge.get("cost", 0.0)
+                timestamp = hedge.get("timestamp", "")
+
+                # Create descriptive name
+                type_names = {
+                    "perp_delta_neutral": "Perp Delta-Neutral",
+                    "protective_put": "Protective Put",
+                    "covered_call": "Covered Call",
+                    "collar": "Collar",
+                    "dynamic_hedge": "Dynamic Hedge",
+                    "straddle": "Straddle",
+                    "butterfly": "Butterfly",
+                    "iron_condor": "Iron Condor",
+                }
+                desc = type_names.get(hedge_type, hedge_type.replace("_", " ").title())
+
+                text += (
+                    f"{i+1}. {desc}\n"
+                    f"   Symbol: `{symbol}`\n"
+                    f"   Qty: `{qty:+.4f}`\n"
+                    f"   Price: `${price:.2f}`\n"
+                    f"   Cost: `${cost:.2f}`\n"
+                    f"   Time: `{timestamp}`\n"
+                )
+
+                # Add strategy-specific details
+                if hedge_type == "straddle" and "straddle_data" in hedge:
+                    straddle_data = hedge["straddle_data"]
+                    strike = straddle_data.get("strike", 0)
+                    put_symbol = straddle_data.get("put_symbol", "")
+                    text += f"\n*Strategy Details:*\n"
+                    text += f"• Strike: `${strike:,.0f}`\n"
+                    text += f"• Call: `{symbol}`\n"
+                    text += f"• Put: `{put_symbol}`\n"
+
+                elif hedge_type == "butterfly" and "butterfly_data" in hedge:
+                    butterfly_data = hedge["butterfly_data"]
+                    lower_strike = butterfly_data.get("lower_strike", 0)
+                    middle_strike = butterfly_data.get("middle_strike", 0)
+                    upper_strike = butterfly_data.get("upper_strike", 0)
+                    text += f"\n*Strategy Details:*\n"
+                    text += f"• Lower Strike: `${lower_strike:,.0f}`\n"
+                    text += f"• Middle Strike: `${middle_strike:,.0f}`\n"
+                    text += f"• Upper Strike: `${upper_strike:,.0f}`\n"
+
+                elif hedge_type == "iron_condor" and "iron_condor_data" in hedge:
+                    iron_condor_data = hedge["iron_condor_data"]
+                    put_lower = iron_condor_data.get("put_lower", 0)
+                    put_upper = iron_condor_data.get("put_upper", 0)
+                    call_lower = iron_condor_data.get("call_lower", 0)
+                    call_upper = iron_condor_data.get("call_upper", 0)
+                    text += f"\n*Strategy Details:*\n"
+                    text += f"• Put Spread: `${put_lower:,.0f}` - `${put_upper:,.0f}`\n"
+                    text += (
+                        f"• Call Spread: `${call_lower:,.0f}` - `${call_upper:,.0f}`\n"
+                    )
+
+                elif hedge_type == "collar" and "collar_data" in hedge:
+                    collar_data = hedge["collar_data"]
+                    put_strike = collar_data.get("put_strike", 0)
+                    call_strike = collar_data.get("call_strike", 0)
+                    text += f"\n*Strategy Details:*\n"
+                    text += f"• Put Strike: `${put_strike:,.0f}`\n"
+                    text += f"• Call Strike: `${call_strike:,.0f}`\n"
                 buttons.append(
                     [
                         {
@@ -3341,17 +4819,73 @@ class SpotHedgerBot:
                 )
                 return
             hedge = hedges[idx]
-            desc = hedge.get("desc", hedge.get("symbol", f"Hedge {idx+1}"))
+            hedge_type = hedge.get("type", "unknown")
+            symbol = hedge.get("symbol", "")
+            qty = hedge.get("qty", 0.0)
             price = hedge.get("price", 0.0)
             cost = hedge.get("cost", 0.0)
-            qty = hedge.get("qty", 0.0)
+            timestamp = hedge.get("timestamp", "")
+
+            # Create descriptive name
+            type_names = {
+                "perp_delta_neutral": "Perp Delta-Neutral",
+                "protective_put": "Protective Put",
+                "covered_call": "Covered Call",
+                "collar": "Collar",
+                "dynamic_hedge": "Dynamic Hedge",
+                "straddle": "Straddle",
+                "butterfly": "Butterfly",
+                "iron_condor": "Iron Condor",
+            }
+            desc = type_names.get(hedge_type, hedge_type.replace("_", " ").title())
+
             text = (
                 f"*Hedge Detail*\n\n"
-                f"Desc: `{desc}`\n"
-                f"Qty: `{qty}`\n"
-                f"Price: `${price}`\n"
-                f"Cost: `${cost}`\n"
+                f"Type: `{desc}`\n"
+                f"Symbol: `{symbol}`\n"
+                f"Qty: `{qty:+.4f}`\n"
+                f"Price: `${price:.2f}`\n"
+                f"Cost: `${cost:.2f}`\n"
+                f"Time: `{timestamp}`\n"
             )
+
+            # Add strategy-specific details
+            if hedge_type == "straddle" and "straddle_data" in hedge:
+                straddle_data = hedge["straddle_data"]
+                strike = straddle_data.get("strike", 0)
+                put_symbol = straddle_data.get("put_symbol", "")
+                text += f"\n*Strategy Details:*\n"
+                text += f"• Strike: `${strike:,.0f}`\n"
+                text += f"• Call: `{symbol}`\n"
+                text += f"• Put: `{put_symbol}`\n"
+
+            elif hedge_type == "butterfly" and "butterfly_data" in hedge:
+                butterfly_data = hedge["butterfly_data"]
+                lower_strike = butterfly_data.get("lower_strike", 0)
+                middle_strike = butterfly_data.get("middle_strike", 0)
+                upper_strike = butterfly_data.get("upper_strike", 0)
+                text += f"\n*Strategy Details:*\n"
+                text += f"• Lower Strike: `${lower_strike:,.0f}`\n"
+                text += f"• Middle Strike: `${middle_strike:,.0f}`\n"
+                text += f"• Upper Strike: `${upper_strike:,.0f}`\n"
+
+            elif hedge_type == "iron_condor" and "iron_condor_data" in hedge:
+                iron_condor_data = hedge["iron_condor_data"]
+                put_lower = iron_condor_data.get("put_lower", 0)
+                put_upper = iron_condor_data.get("put_upper", 0)
+                call_lower = iron_condor_data.get("call_lower", 0)
+                call_upper = iron_condor_data.get("call_upper", 0)
+                text += f"\n*Strategy Details:*\n"
+                text += f"• Put Spread: `${put_lower:,.0f}` - `${put_upper:,.0f}`\n"
+                text += f"• Call Spread: `${call_lower:,.0f}` - `${call_upper:,.0f}`\n"
+
+            elif hedge_type == "collar" and "collar_data" in hedge:
+                collar_data = hedge["collar_data"]
+                put_strike = collar_data.get("put_strike", 0)
+                call_strike = collar_data.get("call_strike", 0)
+                text += f"\n*Strategy Details:*\n"
+                text += f"• Put Strike: `${put_strike:,.0f}`\n"
+                text += f"• Call Strike: `${call_strike:,.0f}`\n"
             from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 
             keyboard = [

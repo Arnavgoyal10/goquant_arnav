@@ -148,19 +148,35 @@ def get_hedge_menu() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(
-                "♻️ Dynamic Hedge",
-                callback_data=encode_callback_data("hedge", "dynamic_hedge"),
+                "🦋 Straddle",
+                callback_data=encode_callback_data("hedge", "straddle"),
             ),
             InlineKeyboardButton(
-                "📂 View Hedges",
-                callback_data=encode_callback_data("hedge", "view_hedges"),
+                "🦋 Butterfly",
+                callback_data=encode_callback_data("hedge", "butterfly"),
             ),
         ],
         [
             InlineKeyboardButton(
+                "🦅 Iron Condor",
+                callback_data=encode_callback_data("hedge", "iron_condor"),
+            ),
+            InlineKeyboardButton(
+                "♻️ Dynamic Hedge",
+                callback_data=encode_callback_data("hedge", "dynamic_hedge"),
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "📂 View Hedges",
+                callback_data=encode_callback_data("hedge", "view_hedges"),
+            ),
+            InlineKeyboardButton(
                 "🗑️ Remove Hedge",
                 callback_data=encode_callback_data("hedge", "remove_hedge"),
             ),
+        ],
+        [
             InlineKeyboardButton("🔙 Back", callback_data="back"),
         ],
     ]

@@ -317,8 +317,11 @@ class Portfolio:
             "last_updated": datetime.now().isoformat(),
         }
 
-    def get_total_delta(self) -> float:
+    def get_total_delta(self, current_prices: dict = None) -> float:
         """Calculate total portfolio delta.
+
+        Args:
+            current_prices: Dictionary of current prices by symbol
 
         Returns:
             Total delta (positive for net long, negative for net short)
@@ -334,18 +337,22 @@ class Portfolio:
                 total_delta += position.qty
             elif position.instrument_type == "option":
                 # For options, calculate actual delta from Greeks
-                # This should be calculated from option pricing model
-                # For now, use a simplified approach based on moneyness
-                option_delta = self._calculate_option_delta(position)
+                option_delta = self._calculate_option_delta(position, current_prices)
                 total_delta += option_delta
 
         return total_delta
 
-    def _calculate_option_delta(self, position: Position) -> float:
+    def _calculate_option_delta(
+        self, position: Position, current_prices: dict = None
+    ) -> float:
         """Calculate delta for an option position.
 
-        This is a simplified calculation. In a real implementation,
-        you would use Black-Scholes or another option pricing model.
+        Args:
+            position: Option position
+            current_prices: Dictionary of current prices by symbol
+
+        Returns:
+            Option delta
         """
         # Extract strike and current price from symbol
         # Example: BTC-11JUL25-113000-P -> strike = 113000
@@ -353,20 +360,30 @@ class Portfolio:
             parts = position.symbol.split("-")
             if len(parts) >= 3:
                 strike = float(parts[2])
-                # Get current price (this should be passed in or fetched)
-                current_price = 111000.0  # Placeholder - should be real price
 
-                # Simplified delta calculation
+                # Get current price from provided prices or use fallback
+                if current_prices and "BTC-USDT-SPOT" in current_prices:
+                    current_price = current_prices["BTC-USDT-SPOT"]
+                else:
+                    current_price = 111372.0  # Fallback current price
+
+                # More realistic delta calculation based on moneyness
+                moneyness = current_price / strike
+
                 if "P" in position.symbol:  # Put option
-                    if current_price > strike:
-                        delta = -0.1  # OTM put
-                    else:
-                        delta = -0.9  # ITM put
+                    if moneyness > 1.0:  # OTM put
+                        delta = -0.15
+                    elif moneyness < 0.95:  # ITM put
+                        delta = -0.85
+                    else:  # ATM put
+                        delta = -0.5
                 else:  # Call option
-                    if current_price > strike:
-                        delta = 0.9  # ITM call
-                    else:
-                        delta = 0.1  # OTM call
+                    if moneyness > 1.05:  # ITM call
+                        delta = 0.85
+                    elif moneyness < 1.0:  # OTM call
+                        delta = 0.15
+                    else:  # ATM call
+                        delta = 0.5
 
                 return delta * position.qty
         except:
@@ -375,8 +392,11 @@ class Portfolio:
 
         return position.qty
 
-    def get_greeks_summary(self) -> dict:
+    def get_greeks_summary(self, current_prices: dict = None) -> dict:
         """Calculate portfolio Greeks summary.
+
+        Args:
+            current_prices: Dictionary of current prices by symbol
 
         Returns:
             Dictionary with portfolio Greeks
@@ -389,7 +409,7 @@ class Portfolio:
         for position in self.positions.values():
             if position.instrument_type == "option":
                 # Calculate Greeks for options
-                greeks = self._calculate_option_greeks(position)
+                greeks = self._calculate_option_greeks(position, current_prices)
                 total_delta += greeks.get("delta", 0.0)
                 total_gamma += greeks.get("gamma", 0.0)
                 total_theta += greeks.get("theta", 0.0)
@@ -405,41 +425,64 @@ class Portfolio:
             "vega": total_vega,
         }
 
-    def _calculate_option_greeks(self, position: Position) -> dict:
+    def _calculate_option_greeks(
+        self, position: Position, current_prices: dict = None
+    ) -> dict:
         """Calculate Greeks for an option position.
 
-        This is a simplified calculation. In a real implementation,
-        you would use Black-Scholes or another option pricing model.
+        Args:
+            position: Option position
+            current_prices: Dictionary of current prices by symbol
+
+        Returns:
+            Dictionary with option Greeks
         """
         try:
             parts = position.symbol.split("-")
             if len(parts) >= 3:
                 strike = float(parts[2])
-                current_price = 111372.0  # More realistic current price
 
-                # More realistic Greeks calculation
+                # Get current price from provided prices or use fallback
+                if current_prices and "BTC-USDT-SPOT" in current_prices:
+                    current_price = current_prices["BTC-USDT-SPOT"]
+                else:
+                    current_price = 111372.0  # Fallback current price
+
+                # Calculate moneyness for more realistic Greeks
+                moneyness = current_price / strike
+
                 if "P" in position.symbol:  # Put option
-                    if current_price > strike:
-                        delta = -0.15  # OTM put
+                    if moneyness > 1.0:  # OTM put
+                        delta = -0.15
                         gamma = 0.008
                         theta = -0.05
                         vega = 0.3
-                    else:
-                        delta = -0.85  # ITM put
+                    elif moneyness < 0.95:  # ITM put
+                        delta = -0.85
                         gamma = 0.015
                         theta = -0.08
                         vega = 0.6
+                    else:  # ATM put
+                        delta = -0.5
+                        gamma = 0.012
+                        theta = -0.06
+                        vega = 0.45
                 else:  # Call option
-                    if current_price > strike:
-                        delta = 0.85  # ITM call
+                    if moneyness > 1.05:  # ITM call
+                        delta = 0.85
                         gamma = 0.015
                         theta = -0.08
                         vega = 0.6
-                    else:
-                        delta = 0.15  # OTM call
+                    elif moneyness < 1.0:  # OTM call
+                        delta = 0.15
                         gamma = 0.008
                         theta = -0.05
                         vega = 0.3
+                    else:  # ATM call
+                        delta = 0.5
+                        gamma = 0.012
+                        theta = -0.06
+                        vega = 0.45
 
                 return {
                     "delta": delta * position.qty,
@@ -461,36 +504,59 @@ class Portfolio:
         """
         return 0.0
 
-    def get_unrealized_pnl(self) -> float:
+    def get_unrealized_pnl(self, current_prices: dict = None) -> float:
         """Calculate unrealized P&L.
 
-        This should use current market prices.
+        Args:
+            current_prices: Dictionary of current prices by symbol
+
+        Returns:
+            Total unrealized P&L
         """
         total_pnl = 0.0
         for position in self.positions.values():
-            # Use more realistic current prices based on instrument type
-            if position.instrument_type == "spot":
-                current_price = 111372.0  # Current BTC spot price
-            elif position.instrument_type == "perpetual":
-                current_price = 111350.0  # Current BTC perp price
-            elif position.instrument_type == "option":
-                # For options, use the stored price as current (simplified)
-                current_price = position.avg_px
+            # Get current price from provided prices or use fallback
+            if current_prices and position.symbol in current_prices:
+                current_price = current_prices[position.symbol]
             else:
-                current_price = 111000.0  # Fallback
+                # Fallback prices based on instrument type
+                if position.instrument_type == "spot":
+                    current_price = 111372.0  # Current BTC spot price
+                elif position.instrument_type == "perpetual":
+                    current_price = 111350.0  # Current BTC perp price
+                elif position.instrument_type == "option":
+                    # For options, use the stored price as current (simplified)
+                    current_price = position.avg_px
+                else:
+                    current_price = 111000.0  # Fallback
 
             unrealized_pnl = (current_price - position.avg_px) * position.qty
             total_pnl += unrealized_pnl
         return total_pnl
 
-    def get_var_95(self) -> float:
+    def get_var_95(self, current_prices: dict = None) -> float:
         """Calculate 95% Value at Risk.
 
-        This is a simplified calculation.
+        Args:
+            current_prices: Dictionary of current prices by symbol
+
+        Returns:
+            95% VaR value
         """
-        total_notional = sum(pos.notional for pos in self.positions.values())
-        # More realistic VaR: 1.5% of notional for diversified portfolio
-        return total_notional * 0.015
+        total_notional = 0.0
+
+        for position in self.positions.values():
+            # Use current price if available, otherwise use average price
+            if current_prices and position.symbol in current_prices:
+                current_price = current_prices[position.symbol]
+            else:
+                current_price = position.avg_px
+
+            notional = abs(position.qty * current_price)
+            total_notional += notional
+
+        # More realistic VaR: 2% of notional for crypto portfolio
+        return total_notional * 0.02
 
     def get_max_drawdown(self) -> float:
         """Calculate maximum drawdown.
