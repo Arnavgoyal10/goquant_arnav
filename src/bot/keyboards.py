@@ -61,6 +61,9 @@ def get_main_menu() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("📈 Analytics", callback_data="analytics"),
+            InlineKeyboardButton("📋 Transactions", callback_data="transactions"),
+        ],
+        [
             InlineKeyboardButton("⚙️ Risk Config", callback_data="risk_config"),
         ],
     ]

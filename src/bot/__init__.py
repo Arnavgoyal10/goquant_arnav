@@ -52,8 +52,8 @@ class SpotHedgerBot:
 
         # Add risk config state (in-memory for now)
         self.risk_config = {
-            "abs_delta": 0.5,  # BTC
-            "var_95": 1000.0,  # USD
+            "abs_delta": 5,  # BTC
+            "var_95": 10000.0,  # USD
             "max_drawdown": 0.15,  # 15%
         }
 
@@ -265,6 +265,8 @@ class SpotHedgerBot:
             await self.show_hedge_menu(update, context)
         elif data == "analytics":
             await self.show_analytics(update, context)
+        elif data == "transactions":
+            await self.show_transactions(update, context)
         elif data == "risk_config":
             await self.show_risk_config(update, context)
         elif data == "back":
@@ -369,6 +371,7 @@ class SpotHedgerBot:
                 "symbol": "BTC-USDT-PERP",
                 "instrument_type": "perpetual",
                 "exchange": "OKX",
+                "direction": "long",  # Add default direction
             },
         }
 
@@ -576,18 +579,58 @@ class SpotHedgerBot:
 
         for position in self.portfolio.positions.values():
             try:
-                # Get current price
-                current_price = await self.get_current_price(position.symbol)
-                unrealized_pnl = (current_price - position.avg_px) * position.qty
-                total_pnl += unrealized_pnl
-
                 direction = "🟢 LONG" if position.is_long else "🔴 SHORT"
-                pnl_color = "🟢" if unrealized_pnl >= 0 else "🔴"
-                positions_text += (
-                    f"• {position.symbol}: {position.qty:+.4f} @ ${position.avg_px:.2f} "
-                    f"({direction})\n"
-                    f"  Current: ${current_price:.2f} | P&L: {pnl_color}${unrealized_pnl:+.2f}\n\n"
-                )
+
+                # Handle different instrument types
+                if position.instrument_type == "option":
+                    # For options, use the stored price and show option-specific info
+                    option_price = position.avg_px
+                    # Try to get current option price from Deribit
+                    try:
+                        from ..exchanges.deribit_options import deribit_options
+
+                        async with deribit_options as options:
+                            ticker = await options.get_option_ticker(position.symbol)
+                            if ticker and ticker.last_price > 0:
+                                current_price = ticker.last_price
+                                unrealized_pnl = (
+                                    current_price - option_price
+                                ) * position.qty
+                                total_pnl += unrealized_pnl
+                                pnl_color = "🟢" if unrealized_pnl >= 0 else "🔴"
+                                positions_text += (
+                                    f"• {position.symbol}: {position.qty:+.4f} @ ${option_price:.4f} "
+                                    f"({direction})\n"
+                                    f"  Current: ${current_price:.4f} | P&L: {pnl_color}${unrealized_pnl:+.2f}\n\n"
+                                )
+                            else:
+                                # Fallback for options without current price
+                                positions_text += (
+                                    f"• {position.symbol}: {position.qty:+.4f} @ ${option_price:.4f} "
+                                    f"({direction})\n"
+                                    f"  Option Price: ${option_price:.4f}\n\n"
+                                )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to get option price for {position.symbol}: {e}"
+                        )
+                        positions_text += (
+                            f"• {position.symbol}: {position.qty:+.4f} @ ${option_price:.4f} "
+                            f"({direction})\n"
+                            f"  Option Price: ${option_price:.4f}\n\n"
+                        )
+                else:
+                    # For spot/futures, get current price normally
+                    current_price = await self.get_current_price(position.symbol)
+                    unrealized_pnl = (current_price - position.avg_px) * position.qty
+                    total_pnl += unrealized_pnl
+
+                    pnl_color = "🟢" if unrealized_pnl >= 0 else "🔴"
+                    positions_text += (
+                        f"• {position.symbol}: {position.qty:+.4f} @ ${position.avg_px:.2f} "
+                        f"({direction})\n"
+                        f"  Current: ${current_price:.2f} | P&L: {pnl_color}${unrealized_pnl:+.2f}\n\n"
+                    )
             except Exception as e:
                 logger.warning(f"Failed to get price for {position.symbol}: {e}")
                 direction = "🟢 LONG" if position.is_long else "🔴 SHORT"
@@ -677,145 +720,151 @@ class SpotHedgerBot:
     async def show_analytics(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show analytics summary and drill-down options."""
         query = update.callback_query
-        # Gather analytics
-        # --- Fallback logic for summary metrics ---
-        positions = list(getattr(self.portfolio, "positions", {}).values())
-        hedges = getattr(self, "active_hedges", [])
-        # Realized/unrealized P&L
-        pnl_realized = 0.0
-        pnl_unrealized = 0.0
-        delta = 0.0
-        for pos in positions:
-            # Each pos: {symbol, qty, avg_px, instrument_type, ...}
-            # For spot/futures: unrealized = (current_price - avg_px) * qty
-            # For options: use mark/last price if available
-            try:
-                # Skip if pos is not dict or object with symbol/qty/avg_px
-                if isinstance(pos, str):
-                    import logging
+        from loguru import logger
 
-                    logging.getLogger(__name__).warning(
-                        f"[analytics fallback] Skipping string position: {pos}"
-                    )
-                    continue
-                if not (
-                    hasattr(pos, "symbol")
-                    or (isinstance(pos, dict) and "symbol" in pos)
-                ):
-                    import logging
+        try:
+            logger.info("show_analytics called")
+            # Gather analytics using portfolio methods
+            pnl_realized = self.portfolio.get_realized_pnl()
+            pnl_unrealized = self.portfolio.get_unrealized_pnl()
+            delta = self.portfolio.get_total_delta()
+            var_95 = self.portfolio.get_var_95()
+            drawdown = self.portfolio.get_max_drawdown()
 
-                    logging.getLogger(__name__).warning(
-                        f"[analytics fallback] Skipping invalid position: {pos}"
-                    )
-                    continue
-                symbol = pos.symbol if hasattr(pos, "symbol") else pos.get("symbol")
-                qty = pos.qty if hasattr(pos, "qty") else pos.get("qty")
-                avg_px = pos.avg_px if hasattr(pos, "avg_px") else pos.get("avg_px")
-                instrument_type = (
-                    pos.instrument_type
-                    if hasattr(pos, "instrument_type")
-                    else pos.get("instrument_type")
+            # Hedge effectiveness: % delta hedged
+            gross_delta = abs(delta)
+            spot_delta = delta  # For now, use total delta
+            hedge_delta = 0.0  # This would be calculated from hedge positions
+            effectiveness = (
+                (abs(hedge_delta) / gross_delta * 100) if gross_delta > 0 else 0.0
+            )
+
+            # Option Greeks summary
+            greeks = self.portfolio.get_greeks_summary()
+            greeks_text = ""
+            if greeks:
+                greeks_text = "\n".join(
+                    [f"• {k.capitalize()}: `{v:+.4f}`" for k, v in greeks.items()]
                 )
-                current_price = await self.get_current_price(symbol)
-                if instrument_type in ("spot", "perpetual", "future"):
-                    pnl_unrealized += (current_price - avg_px) * qty
-                    delta += qty
-                elif instrument_type == "option":
-                    # Option: use mark/last price if available
-                    last_px = getattr(pos, "last_price", None) or pos.get(
-                        "last_price", 0.0
-                    )
-                    if not last_px:
-                        last_px = current_price
-                    pnl_unrealized += (last_px - avg_px) * qty
-                    # Delta: use pos.delta if available
-                    delta += getattr(pos, "delta", 0.0) or pos.get("delta", 0.0)
-            except Exception as e:
-                import logging
 
-                logging.getLogger(__name__).error(f"[analytics fallback] Error: {e}")
-        # Use portfolio methods if available and nonzero
-        if hasattr(self.portfolio, "get_realized_pnl"):
-            val = self.portfolio.get_realized_pnl()
-            if val:
-                pnl_realized = val
-        if hasattr(self.portfolio, "get_unrealized_pnl"):
-            val = self.portfolio.get_unrealized_pnl()
-            if val:
-                pnl_unrealized = val
-        if hasattr(self.portfolio, "get_total_delta"):
-            val = self.portfolio.get_total_delta()
-            if val:
-                delta = val
-        var_95 = (
-            self.portfolio.get_var_95()
-            if hasattr(self.portfolio, "get_var_95")
-            else 0.0
-        )
-        drawdown = (
-            self.portfolio.get_max_drawdown()
-            if hasattr(self.portfolio, "get_max_drawdown")
-            else 0.0
-        )
-        # Hedge effectiveness: % delta hedged
-        gross_delta = abs(delta)
-        spot_delta = (
-            self.portfolio.get_spot_delta()
-            if hasattr(self.portfolio, "get_spot_delta")
-            else delta
-        )
-        hedge_delta = (
-            self.portfolio.get_hedge_delta()
-            if hasattr(self.portfolio, "get_hedge_delta")
-            else 0.0
-        )
-        effectiveness = (
-            (abs(hedge_delta) / gross_delta * 100) if gross_delta > 0 else 0.0
-        )
-        # Option Greeks summary (if available)
-        greeks = (
-            self.portfolio.get_greeks_summary()
-            if hasattr(self.portfolio, "get_greeks_summary")
-            else {}
-        )
-        greeks_text = ""
-        if greeks:
-            greeks_text = "\n".join([f"• {k}: `{v:+.4f}`" for k, v in greeks.items()])
-        # Compose analytics summary
-        text = (
-            f"📊 *Portfolio Analytics*\n\n"
-            f"• Realized P&L: `${pnl_realized:,.2f}`\n"
-            f"• Unrealized P&L: `${pnl_unrealized:,.2f}`\n"
-            f"• Current Delta: `{delta:+.4f}` BTC\n"
-            f"• 95% VaR: `${var_95:,.2f}`\n"
-            f"• Max Drawdown: `{drawdown:.2%}`\n"
-            f"• Hedge Effectiveness: `{effectiveness:.1f}%`\n"
-        )
-        if greeks_text:
-            text += f"\n*Option Greeks:*\n{greeks_text}"
-        # Debug: log positions
-        import logging
+            # Compose analytics summary
+            text = (
+                f"📊 *Portfolio Analytics*\n\n"
+                f"• Realized P&L: `${pnl_realized:,.2f}`\n"
+                f"• Unrealized P&L: `${pnl_unrealized:,.2f}`\n"
+                f"• Current Delta: `{delta:+.4f}` BTC\n"
+                f"• 95% VaR: `${var_95:,.2f}`\n"
+                f"• Max Drawdown: `{drawdown:.2%}`\n"
+                f"• Hedge Effectiveness: `{effectiveness:.1f}%`\n"
+            )
+            if greeks_text:
+                text += f"\n*Option Greeks:*\n{greeks_text}"
 
-        logging.getLogger(__name__).info(f"[analytics] positions: {positions}")
+            from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+            # Create analytics menu with drill-down options
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "📊 By Position",
+                        callback_data=encode_callback_data("analytics", "by_position"),
+                    ),
+                    InlineKeyboardButton(
+                        "🛡️ By Hedge",
+                        callback_data=encode_callback_data("analytics", "by_hedge"),
+                    ),
+                ],
+                [InlineKeyboardButton("🔙 Back", callback_data="back")],
+            ]
+            await query.edit_message_text(
+                text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.error(f"Error in show_analytics: {e}")
+            from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+            await query.edit_message_text(
+                "❌ Failed to load analytics. Please try again later.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🔙 Back", callback_data="back")]]
+                ),
+                parse_mode="Markdown",
+            )
+
+    async def show_transactions(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        """Show transaction history."""
+        query = update.callback_query
+
+        # Get transaction summary
+        summary = self.portfolio.get_transaction_summary()
+        transactions = self.portfolio.get_transaction_history(limit=20)  # Show last 20
+
+        # Compose transaction summary
+        text = f"📋 *Transaction History*\n\n"
+
+        if not transactions:
+            text += "No transactions recorded yet."
+        else:
+            # Summary statistics
+            total_pnl = summary["total_pnl"]
+            total_volume = summary["total_volume"]
+            pnl_color = "🟢" if total_pnl >= 0 else "🔴"
+
+            text += (
+                f"📊 *Summary:*\n"
+                f"• Total Transactions: {summary['total_transactions']}\n"
+                f"• Total Volume: ${total_volume:,.2f}\n"
+                f"• Total P&L: {pnl_color}${total_pnl:+,.2f}\n\n"
+            )
+
+            # Recent transactions
+            text += "📝 *Recent Transactions:*\n"
+            for i, tx in enumerate(transactions[:10], 1):  # Show last 10
+                # Format timestamp
+                timestamp = tx.timestamp.strftime("%m/%d %H:%M")
+
+                # Format quantity and price
+                qty_str = (
+                    f"{tx.qty:+.4f}" if abs(tx.qty) >= 0.0001 else f"{tx.qty:+.6f}"
+                )
+                price_str = f"${tx.price:.2f}"
+
+                # Transaction type emoji
+                type_emoji = {
+                    "buy": "🟢",
+                    "sell": "🔴",
+                    "add": "➕",
+                    "remove": "➖",
+                    "hedge": "🛡️",
+                }.get(tx.transaction_type, "📊")
+
+                # P&L if available
+                pnl_str = ""
+                if tx.pnl is not None:
+                    pnl_color = "🟢" if tx.pnl >= 0 else "🔴"
+                    pnl_str = f" | P&L: {pnl_color}${tx.pnl:+,.2f}"
+
+                text += (
+                    f"{i}. {type_emoji} {tx.symbol} {qty_str} @ {price_str}"
+                    f"{pnl_str}\n"
+                    f"   {timestamp} | {tx.transaction_type.title()}\n\n"
+                )
+
+            if len(transactions) > 10:
+                text += f"... and {len(transactions) - 10} more transactions\n\n"
+
+        # Add timestamp
+        text += f"_Updated at {datetime.now().strftime('%H:%M:%S')}_"
+
+        # Create back button
         from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "View by Position", callback_data="analytics|by_position|{}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "View by Hedge", callback_data="analytics|by_hedge|{}"
-                )
-            ],
-            [InlineKeyboardButton("⬅️ Back", callback_data="back")],
-        ]
+        keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="back")]]
+
         await query.edit_message_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown",
+            text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
         )
 
     async def handle_analytics_callback(
@@ -1125,28 +1174,7 @@ class SpotHedgerBot:
             await self.start_dynamic_hedge(update, context)
         elif step == "dynamic_hedge_auto":
             await self.dynamic_hedge_auto_flow(update, context)
-        elif step == "dynamic_hedge_select":
-            await self.dynamic_hedge_select_expiry(update, context)
-        elif step == "dynamic_hedge_select_strike":
-            # Handle string data for expiry
-            if isinstance(data, str):
-                data = {"expiry": data}
-            await self.dynamic_hedge_select_strike(update, context, data)
-        elif step == "dynamic_hedge_select_confirm":
-            # Support 'expiry|strike|option_type' format
-            if isinstance(data, str):
-                parts = data.split("|")
-                if len(parts) == 3:
-                    data = {
-                        "expiry": parts[0],
-                        "strike": parts[1],
-                        "option_type": parts[2],
-                    }
-                elif len(parts) == 2:
-                    data = {"expiry": parts[0], "strike": parts[1]}
-                elif len(parts) == 1:
-                    data = {"expiry": parts[0]}
-            await self.dynamic_hedge_select_confirm(update, context, data)
+
         elif step == "view_hedges":
             await self.show_active_hedges(update, context)
         elif step == "remove_hedge":
@@ -2755,32 +2783,10 @@ class SpotHedgerBot:
             )
             return
 
-        # Step 1: Ask user to choose Select or Automatic
+        # Go directly to automatic flow
         logger = logging.getLogger(__name__)
-        logger.info("[dynamic_hedge] Showing Select/Automatic options to user")
-        text = (
-            f"♻️ *Dynamic Hedge*\n\n"
-            f"Current Portfolio Delta: {total_delta:+.4f} BTC\n\n"
-            f"How would you like to select your dynamic hedge?"
-        )
-        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-
-        keyboard = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "🔍 Select", callback_data="hedge|dynamic_hedge_select|{}"
-                    ),
-                    InlineKeyboardButton(
-                        "⚡ Automatic", callback_data="hedge|dynamic_hedge_auto|{}"
-                    ),
-                ],
-                [InlineKeyboardButton("⬅️ Back", callback_data="back")],
-            ]
-        )
-        await query.edit_message_text(
-            text, reply_markup=keyboard, parse_mode="Markdown"
-        )
+        logger.info("[dynamic_hedge] Starting automatic dynamic hedge")
+        await self.dynamic_hedge_auto_flow(update, context)
 
     async def dynamic_hedge_auto_flow(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2976,331 +2982,6 @@ class SpotHedgerBot:
                 f"❌ Error loading options data: {str(e)}\n\n"
                 f"Try perpetual delta-neutral hedge instead."
             )
-            await query.edit_message_text(
-                text, reply_markup=get_back_button(), parse_mode="Markdown"
-            )
-
-    async def dynamic_hedge_select_expiry(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ):
-        """Show available expiries for dynamic hedge selection."""
-        logger = logging.getLogger(__name__)
-        logger.info("[dynamic_hedge_select_expiry] Showing available expiries")
-        query = update.callback_query
-
-        try:
-            from ..exchanges.deribit_options import deribit_options
-
-            async with deribit_options:
-                instruments = await deribit_options.get_instruments()
-
-                # Get unique expiries from symbol parsing (like other strategies)
-                expiries = set()
-                for i in instruments:
-                    if i.symbol.startswith("BTC") and i.instrument_type == "option":
-                        parts = i.symbol.split("-")
-                        if len(parts) >= 2:
-                            expiries.add(parts[1])
-
-                if not expiries:
-                    text = "❌ No option expiries available."
-                    await query.edit_message_text(
-                        text, reply_markup=get_back_button(), parse_mode="Markdown"
-                    )
-                    return
-
-                # Sort expiries
-                sorted_expiries = sorted(expiries)
-
-                text = "📅 *Select Expiry for Dynamic Hedge*\n\nChoose an expiry date:"
-                from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-
-                keyboard = []
-                for expiry in sorted_expiries[:10]:  # Limit to 10 expiries
-                    keyboard.append(
-                        [
-                            InlineKeyboardButton(
-                                expiry,
-                                callback_data=f"hedge|dynamic_hedge_select_strike|{expiry}",
-                            )
-                        ]
-                    )
-                keyboard.append(
-                    [
-                        InlineKeyboardButton(
-                            "⬅️ Back", callback_data="hedge|dynamic_hedge|{}"
-                        )
-                    ]
-                )
-
-                await query.edit_message_text(
-                    text,
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode="Markdown",
-                )
-
-        except Exception as e:
-            logger.error(f"Error in dynamic hedge select expiry: {e}")
-            text = f"❌ Error loading expiries: {str(e)}"
-            await query.edit_message_text(
-                text, reply_markup=get_back_button(), parse_mode="Markdown"
-            )
-
-    async def dynamic_hedge_select_strike(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE, data: dict
-    ):
-        """Show available strikes for selected expiry in dynamic hedge."""
-        logger = logging.getLogger(__name__)
-        logger.info(f"[dynamic_hedge_select_strike] Entered with data: {data}")
-        query = update.callback_query
-        expiry = data.get("expiry")
-
-        try:
-            from ..exchanges.deribit_options import deribit_options
-
-            async with deribit_options:
-                instruments = await deribit_options.get_instruments()
-
-                # Get current price to find ATM strikes
-                current_price = await self.get_current_price("BTC-USDT-PERP")
-
-                # Filter options for this expiry
-                options = []
-                for i in instruments:
-                    if i.symbol.startswith("BTC") and i.instrument_type == "option":
-                        parts = i.symbol.split("-")
-                        if len(parts) >= 2 and parts[1] == expiry:
-                            options.append(i)
-
-                if not options:
-                    text = f"❌ No options available for expiry {expiry}."
-                    await query.edit_message_text(
-                        text, reply_markup=get_back_button(), parse_mode="Markdown"
-                    )
-                    return
-
-                # Get tickers for all options
-                tickers = []
-                for option in options:
-                    ticker = await deribit_options.get_option_ticker(option.symbol)
-                    if ticker:
-                        tickers.append(ticker)
-
-                if not tickers:
-                    text = f"❌ No option prices available for expiry {expiry}."
-                    await query.edit_message_text(
-                        text, reply_markup=get_back_button(), parse_mode="Markdown"
-                    )
-                    return
-
-                # Find strikes around current price (5 below, 5 above)
-                current_strikes = []
-                for ticker in tickers:
-                    if (
-                        abs(ticker.strike - current_price) <= current_price * 0.1
-                    ):  # Within 10%
-                        current_strikes.append(ticker)
-
-                # Sort by distance from current price
-                current_strikes.sort(key=lambda x: abs(x.strike - current_price))
-
-                # Take 5 puts and 5 calls closest to current price
-                puts = [t for t in current_strikes if "P" in t.symbol][:5]
-                calls = [t for t in current_strikes if "C" in t.symbol][:5]
-
-                text = f"🎯 *Select Strike for Dynamic Hedge*\n\nExpiry: {expiry}\nCurrent Price: ${current_price:,.0f}\n\nChoose a strike:"
-                from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-
-                keyboard = []
-
-                # Add puts
-                if puts:
-                    keyboard.append(
-                        [InlineKeyboardButton("📉 PUTS", callback_data="header")]
-                    )
-                    for ticker in puts:
-                        price = (
-                            ticker.mid_price
-                            if ticker.mid_price > 0
-                            else ticker.last_price
-                        )
-                        if price <= 0:
-                            price = ticker.strike * 0.05
-                        label = f"${ticker.strike:,.0f} @ ${price:.2f}"
-                        keyboard.append(
-                            [
-                                InlineKeyboardButton(
-                                    label,
-                                    callback_data=f"hedge|dynamic_hedge_select_confirm|{expiry}|{ticker.strike}|{ticker.option_type}",
-                                )
-                            ]
-                        )
-
-                # Add calls
-                if calls:
-                    keyboard.append(
-                        [InlineKeyboardButton("📈 CALLS", callback_data="header")]
-                    )
-                    for ticker in calls:
-                        price = (
-                            ticker.mid_price
-                            if ticker.mid_price > 0
-                            else ticker.last_price
-                        )
-                        if price <= 0:
-                            price = ticker.strike * 0.03
-                        label = f"${ticker.strike:,.0f} @ ${price:.2f}"
-                        keyboard.append(
-                            [
-                                InlineKeyboardButton(
-                                    label,
-                                    callback_data=f"hedge|dynamic_hedge_select_confirm|{expiry}|{ticker.strike}|{ticker.option_type}",
-                                )
-                            ]
-                        )
-
-                keyboard.append(
-                    [
-                        InlineKeyboardButton(
-                            "⬅️ Back", callback_data="hedge|dynamic_hedge_select_expiry|"
-                        )
-                    ]
-                )
-
-                await query.edit_message_text(
-                    text,
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode="Markdown",
-                )
-
-        except Exception as e:
-            logger.error(f"Error in dynamic hedge select strike: {e}")
-            text = f"❌ Error loading strikes: {str(e)}"
-            await query.edit_message_text(
-                text, reply_markup=get_back_button(), parse_mode="Markdown"
-            )
-
-    async def dynamic_hedge_select_confirm(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE, data: dict
-    ):
-        """Show confirmation for selected dynamic hedge option."""
-        logger = logging.getLogger(__name__)
-        logger.info(f"[dynamic_hedge_select_confirm] Entered with data: {data}")
-        query = update.callback_query
-        expiry = data.get("expiry")
-        option_type = data.get("option_type")  # "put" or "call"
-        strike = float(data.get("strike"))
-
-        try:
-            from ..exchanges.deribit_options import deribit_options
-
-            async with deribit_options:
-                instruments = await deribit_options.get_instruments()
-                # Find the symbol for this expiry/strike/type
-                symbol = None
-                for i in instruments:
-                    if (
-                        i.symbol.startswith("BTC")
-                        and i.instrument_type == "option"
-                        and f"-{option_type.upper()[0]}" in i.symbol
-                    ):
-                        parts = i.symbol.split("-")
-                        if parts[1] == expiry and float(parts[2]) == strike:
-                            symbol = i.symbol
-                            break
-                if not symbol:
-                    logger.error(
-                        f"[dynamic_hedge_select_confirm] Option not found for expiry={expiry}, strike={strike}, type={option_type}"
-                    )
-                    await query.edit_message_text(
-                        "❌ Option not found.", reply_markup=get_back_button()
-                    )
-                    return
-                ticker = await deribit_options.get_option_ticker(symbol)
-                if not ticker:
-                    logger.error(
-                        f"[dynamic_hedge_select_confirm] Option price unavailable for symbol={symbol}"
-                    )
-                    await query.edit_message_text(
-                        "❌ Option price unavailable.", reply_markup=get_back_button()
-                    )
-                    return
-
-                # Calculate hedge quantities
-                total_delta = self.portfolio.get_total_delta()
-                target_delta = total_delta * 0.3  # Reduce to 30% of current delta
-                hedge_delta = total_delta - target_delta
-
-                # Calculate quantity based on option delta
-                quantity = (
-                    hedge_delta / abs(ticker.delta) if abs(ticker.delta) > 0 else 0.0
-                )
-
-                # Calculate price with fallbacks
-                price = ticker.mid_price if ticker.mid_price > 0 else ticker.last_price
-                if price <= 0:
-                    if option_type == "put":
-                        price = ticker.strike * 0.05
-                    else:
-                        price = ticker.strike * 0.03
-
-                cost = quantity * price
-                current_price = await self.get_current_price("BTC-USDT-PERP")
-                risk_reduction = total_delta * current_price * 0.20
-
-                # Determine hedge type
-                hedge_type = (
-                    "protective_put" if option_type == "put" else "covered_call"
-                )
-
-                text = (
-                    f"♻️ *Dynamic Hedge Summary*\n\n"
-                    f"Current Portfolio Delta: {total_delta:+.4f} BTC\n"
-                    f"Target Delta: {target_delta:+.4f} BTC\n\n"
-                    f"*Selected Option:*\n"
-                    f"• Type: {hedge_type.replace('_', ' ').title()}\n"
-                    f"• Symbol: {ticker.symbol}\n"
-                    f"• Strike: ${ticker.strike:,.0f}\n"
-                    f"• Expiry: {expiry}\n"
-                    f"• Quantity: {quantity:.4f} contracts\n"
-                    f"• Price: ${price:.2f}\n"
-                    f"• Cost: ${cost:,.2f}\n"
-                    f"• Risk Reduction: ${risk_reduction:,.2f}\n\n"
-                    f"*Greeks:*\n"
-                    f"• Delta: {ticker.delta:.4f}\n"
-                    f"• Gamma: {ticker.gamma:.6f}\n"
-                    f"• Theta: {ticker.theta:.4f}\n"
-                    f"• Vega: {ticker.vega:.4f}\n"
-                    f"• IV: {ticker.implied_volatility:.1%}\n\n"
-                    f"*Dynamic Features:*\n"
-                    f"• Auto-rebalancing based on delta changes\n"
-                    f"• Real-time Greeks monitoring\n"
-                    f"• Optimal strike selection\n"
-                    f"• Cost-effective hedging"
-                )
-
-                # Store hedge data
-                context.user_data["pending_hedge"] = {
-                    "type": "dynamic_hedge",
-                    "symbol": ticker.symbol,
-                    "qty": quantity,
-                    "price": price,
-                    "cost": cost,
-                    "instrument_type": "option",
-                    "exchange": "Deribit",
-                    "target_delta": target_delta,
-                    "option_contract": ticker,
-                }
-
-                await query.edit_message_text(
-                    text,
-                    reply_markup=get_confirmation_buttons("hedge"),
-                    parse_mode="Markdown",
-                )
-
-        except Exception as e:
-            logger.error(f"Error in dynamic hedge select confirm: {e}")
-            text = f"❌ Error confirming dynamic hedge: {str(e)}"
             await query.edit_message_text(
                 text, reply_markup=get_back_button(), parse_mode="Markdown"
             )

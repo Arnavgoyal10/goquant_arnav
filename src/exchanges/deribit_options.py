@@ -100,6 +100,61 @@ class DeribitOptionsExchange:
             logger.error(f"Error fetching Deribit instruments: {e}")
             return []
 
+    async def get_instruments_by_expiry(self, expiry: str) -> List[Instrument]:
+        """Get instruments filtered by expiry date.
+
+        Args:
+            expiry: Expiry date string (e.g., '11JUL25')
+
+        Returns:
+            List of instruments for the specified expiry
+        """
+        if not self.session:
+            logger.error("Session not initialized")
+            return []
+
+        try:
+            url = f"{self.BASE_URL}/api/v2/public/get_instruments"
+            params = {"currency": "BTC", "kind": "option"}
+
+            async with self.session.get(url, params=params) as response:
+                if response.status != 200:
+                    logger.error(f"Deribit API error: {response.status}")
+                    return []
+
+                data = await response.json()
+                if data.get("error"):
+                    logger.error(f"Deribit API error: {data['error']}")
+                    return []
+
+                instruments = []
+                for item in data["result"]:
+                    # Check if this instrument matches the expiry
+                    instrument_name = item["instrument_name"]
+                    if expiry in instrument_name:
+                        instrument = Instrument(
+                            symbol=item["instrument_name"],
+                            exchange="Deribit",
+                            instrument_type="option",
+                            base_asset="BTC",
+                            quote_asset="USD",
+                            min_size=0.001,
+                            tick_size=0.5,
+                            price_precision=1,
+                        )
+                        # Add strike and option type for easier filtering
+                        parts = instrument_name.split("-")
+                        if len(parts) >= 4:
+                            instrument.strike = float(parts[2])
+                            instrument.option_type = parts[3].lower()
+                        instruments.append(instrument)
+
+                return instruments
+
+        except Exception as e:
+            logger.error(f"Error fetching Deribit instruments by expiry: {e}")
+            return []
+
     async def get_option_ticker(self, symbol: str) -> Optional[OptionContract]:
         """Get options ticker data.
 
