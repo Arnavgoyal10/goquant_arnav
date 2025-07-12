@@ -1,5 +1,3 @@
-"""Test bot functionality without starting polling."""
-
 import asyncio
 from unittest.mock import Mock, AsyncMock
 from telegram import Update, User, Message, CallbackQuery

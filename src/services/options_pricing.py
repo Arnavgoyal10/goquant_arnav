@@ -1,5 +1,3 @@
-"""Options pricing service with Black-Scholes calculations."""
-
 import math
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass

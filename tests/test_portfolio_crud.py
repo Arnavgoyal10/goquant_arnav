@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-"""Test portfolio CRUD operations."""
-
 import asyncio
 from src.portfolio.state import Portfolio
 from src.services.costing import costing_service

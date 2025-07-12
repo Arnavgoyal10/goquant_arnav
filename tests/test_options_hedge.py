@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-"""Test script for options hedging functionality."""
-
 import asyncio
 import sys
 import os
@@ -8,9 +5,9 @@ import os
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
-from services.hedge import hedge_service
-from services.options_pricing import options_pricing_service
-from exchanges.deribit_options import deribit_options, OptionContract
+from src.services.hedge import hedge_service
+from src.services.options_pricing import options_pricing_service
+from src.exchanges.deribit_options import deribit_options, OptionContract
 from datetime import datetime, timedelta
 
 

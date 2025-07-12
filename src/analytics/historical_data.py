@@ -1,5 +1,3 @@
-"""Historical data collection for correlation analysis and stress testing."""
-
 import asyncio
 import pandas as pd
 from datetime import datetime, timedelta

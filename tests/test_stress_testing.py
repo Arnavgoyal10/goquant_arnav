@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-"""Test script for stress testing implementation."""
-
 import asyncio
 import sys
 import os

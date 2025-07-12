@@ -1,5 +1,3 @@
-"""Deribit options exchange connectivity for options trading."""
-
 import asyncio
 import aiohttp
 from datetime import datetime, timedelta

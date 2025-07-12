@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-"""Test real-time pricing functionality."""
-
 import asyncio
 from src.exchanges.okx import OKXExchange
 from src.exchanges.deribit import DeribitExchange

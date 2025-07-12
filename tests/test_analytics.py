@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-"""Test script to verify analytics calculations."""
-
 import asyncio
 from src.portfolio.state import Portfolio, Position
 from datetime import datetime

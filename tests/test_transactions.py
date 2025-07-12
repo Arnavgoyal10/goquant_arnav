@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-"""Test script for transactions functionality."""
-
 import asyncio
 from src.portfolio.state import Portfolio, Transaction
 from datetime import datetime

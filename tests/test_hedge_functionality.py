@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-"""Test hedge functionality."""
-
 import asyncio
 from src.portfolio.state import Portfolio
 from src.services.hedge import hedge_service

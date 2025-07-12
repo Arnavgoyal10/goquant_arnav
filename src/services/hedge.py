@@ -1,5 +1,3 @@
-"""Hedge service for calculating hedge recommendations and risk metrics."""
-
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from loguru import logger

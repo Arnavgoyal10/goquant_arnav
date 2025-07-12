@@ -1,5 +1,3 @@
-"""Greeks calculations for options and derivatives."""
-
 import math
 from typing import Dict, Any
 from loguru import logger

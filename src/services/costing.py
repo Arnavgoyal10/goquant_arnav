@@ -1,5 +1,3 @@
-"""Costing service for fee and slippage estimates."""
-
 from typing import Dict, Any
 from loguru import logger
 import numpy as np

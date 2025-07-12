@@ -1,5 +1,3 @@
-"""Telegram bot core for the spot hedging bot."""
-
 import os
 import asyncio
 import aiohttp

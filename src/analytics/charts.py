@@ -1,5 +1,3 @@
-"""Chart generation for analytics and visualizations."""
-
 import matplotlib
 
 matplotlib.use("Agg")  # Use non-interactive backend for server environments

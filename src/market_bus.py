@@ -1,5 +1,3 @@
-"""Market data bus that merges streams from multiple exchanges."""
-
 import asyncio
 from datetime import datetime
 from typing import AsyncGenerator

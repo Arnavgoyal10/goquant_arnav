@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-"""Test script for new option strategies."""
-
 import asyncio
 import sys
 import os

@@ -1,5 +1,3 @@
-"""Inline keyboard layouts for the Telegram bot."""
-
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from typing import List, Dict, Any
 import json

@@ -1,5 +1,3 @@
-"""Deribit exchange connectivity for market data."""
-
 import asyncio
 import aiohttp
 from datetime import datetime

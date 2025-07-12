@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-"""Test script for correlation analysis implementation."""
-
 import asyncio
 import sys
 import os

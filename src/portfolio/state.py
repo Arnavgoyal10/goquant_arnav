@@ -1,5 +1,3 @@
-"""Portfolio state management for position tracking."""
-
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from typing import Dict, List, Optional, Literal

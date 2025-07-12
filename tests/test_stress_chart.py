@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-"""Test script for stress test chart generation."""
-
 import sys
 import os
 

@@ -1,5 +1,3 @@
-"""Unit tests for portfolio management."""
-
 import pytest
 from datetime import datetime
 

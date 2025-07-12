@@ -1,5 +1,3 @@
-"""Unit tests for the Telegram bot functionality."""
-
 import pytest
 from unittest.mock import Mock, AsyncMock
 from telegram import Update, User, Message, CallbackQuery, Chat

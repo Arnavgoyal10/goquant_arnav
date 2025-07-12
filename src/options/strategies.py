@@ -1,5 +1,3 @@
-"""Option strategies module with payoff and greek calculations."""
-
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 from loguru import logger

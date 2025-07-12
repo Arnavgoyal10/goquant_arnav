@@ -1,5 +1,3 @@
-"""Risk metrics calculation for portfolio management."""
-
 from typing import Dict, List, Any
 from loguru import logger
 
