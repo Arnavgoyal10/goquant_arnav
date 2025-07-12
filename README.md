@@ -12,6 +12,52 @@ A sophisticated Telegram-based cryptocurrency trading bot designed for spot expo
 - **Transaction Tracking**: Complete transaction history with P&L attribution
 - **Performance Analytics**: Detailed attribution and cost-benefit analysis
 
+### Advanced Analytics & Risk Management
+
+#### **Historical Data Analysis** (`src/analytics/historical_data.py`)
+- **Multi-exchange Data Collection**: Historical price data from OKX and Deribit
+- **Caching System**: Intelligent data caching with configurable duration
+- **Portfolio-wide Analysis**: Batch historical data collection for multiple symbols
+- **Returns Calculation**: Daily returns and performance metrics
+- **Data Validation**: Robust error handling and data quality checks
+
+#### **Correlation Analysis** (`src/analytics/correlation.py`)
+- **Portfolio Correlation Matrix**: Complete correlation analysis across all positions
+- **Hedge-Portfolio Correlations**: Specific analysis of hedge effectiveness
+- **Statistical Insights**: Mean, standard deviation, and extreme correlation detection
+- **Telegram Integration**: Formatted correlation reports for bot interface
+- **High Correlation Detection**: Automatic identification of highly correlated pairs
+
+#### **Chart Generation** (`src/analytics/charts.py`)
+- **Correlation Heatmaps**: Visual correlation matrix representation
+- **P&L Time Series**: Portfolio performance over time visualization
+- **Stress Test Charts**: Bar charts for stress testing results
+- **Risk Metrics Visualization**: Comprehensive risk dashboard charts
+- **Hedge Effectiveness Charts**: Visual analysis of hedge performance
+- **Portfolio Performance Charts**: Multi-dimensional performance analysis
+
+#### **Stress Testing** (`src/analytics/stress_testing.py`)
+- **Predefined Scenarios**: Market crash, volatility spike, flash crash simulations
+- **Customizable Parameters**: Price shocks, volatility multipliers, correlation shifts
+- **Portfolio Impact Analysis**: P&L and VaR changes under stress conditions
+- **Hedge Effectiveness Testing**: How hedges perform under extreme market conditions
+- **Risk Metrics Comparison**: Before/after stress scenario analysis
+
+### Risk Management Enhancements
+
+#### **Advanced Greeks Calculation** (`src/risk/greeks.py`)
+- **Black-Scholes Implementation**: Complete options pricing model
+- **Multi-instrument Support**: Delta calculation for spot, perpetual, and options
+- **Portfolio-level Greeks**: Aggregate Greeks across all positions
+- **Real-time Updates**: Dynamic Greeks calculation with live market data
+
+#### **Comprehensive Risk Metrics** (`src/risk/metrics.py`)
+- **Position-level Risk**: Individual position risk assessment
+- **Portfolio Concentration**: Largest position and top 3 concentration analysis
+- **Delta Exposure Breakdown**: Risk exposure by instrument type
+- **Risk Reports**: Human-readable risk summaries
+- **Real-time Monitoring**: Continuous risk metric updates
+
 ### Hedging Strategies
 
 #### 1. **Perpetual Delta-Neutral Hedge**
@@ -182,6 +228,16 @@ A sophisticated Telegram-based cryptocurrency trading bot designed for spot expo
 - Price feed management
 - Data normalization across exchanges
 
+#### 7. **Advanced Analytics** (`src/analytics/`)
+- **Historical Data** (`historical_data.py`): Multi-exchange data collection
+- **Correlation Analysis** (`correlation.py`): Portfolio correlation matrix
+- **Chart Generation** (`charts.py`): Visual analytics and reporting
+- **Stress Testing** (`stress_testing.py`): Scenario-based stress testing
+
+#### 8. **Risk Management** (`src/risk/`)
+- **Greeks Calculation** (`greeks.py`): Black-Scholes and delta calculations
+- **Risk Metrics** (`metrics.py`): Comprehensive risk assessment
+
 ## 🧭 Code Navigation Guide
 
 This section helps new developers understand the codebase structure and navigate through the different components.
@@ -191,6 +247,7 @@ This section helps new developers understand the codebase structure and navigate
 ```
 goquant/
 ├── main.py                          # Entry point - starts the bot
+├── fetch_option_chain.py           # Utility for fetching option data
 ├── requirements.txt                 # Python dependencies
 ├── README.md                       # This documentation
 ├── src/                            # Main source code
@@ -210,10 +267,17 @@ goquant/
 │   │   ├── costing.py             # Fee & slippage calculations
 │   │   ├── hedge.py               # Hedge strategy logic
 │   │   └── options_pricing.py     # Options pricing models
-│   ├── risk/                       # Risk management
+│   ├── analytics/                  # Advanced analytics & reporting
+│   │   ├── historical_data.py     # Multi-exchange data collection
+│   │   ├── correlation.py         # Portfolio correlation analysis
+│   │   ├── charts.py              # Chart generation & visualization
+│   │   └── stress_testing.py      # Scenario-based stress testing
+│   ├── risk/                       # Risk management & calculations
+│   │   ├── greeks.py              # Black-Scholes & Greeks calculation
+│   │   └── metrics.py             # Comprehensive risk metrics
 │   ├── util/                       # Utilities
 │   └── market_bus.py              # Market data aggregation
-├── tests/                          # Test files
+├── tests/                          # Comprehensive test suite
 ├── configs/                        # Configuration files
 ├── docs/                           # Documentation
 └── notebooks/                      # Jupyter notebooks
@@ -406,7 +470,66 @@ class HedgeService:
 **What it does**: Implements hedge strategy logic and optimization
 **For new developers**: Core business logic for hedging decisions
 
-#### **7. User Interface (`src/bot/keyboards.py`)**
+#### **7. Advanced Analytics (`src/analytics/`)**
+
+**Historical Data Collector (`historical_data.py`)**:
+```python
+class HistoricalDataCollector:
+    async def get_historical_data(self, symbol: str, days: int = 30) -> pd.DataFrame
+    async def get_portfolio_historical_data(self, symbols: List[str], days: int = 30) -> Dict
+```
+**What it does**: Collects and caches historical price data from multiple exchanges
+**For new developers**: Essential for correlation analysis and stress testing
+
+**Correlation Analyzer (`correlation.py`)**:
+```python
+class CorrelationAnalyzer:
+    async def calculate_portfolio_correlation_matrix(self, portfolio_symbols, hedge_symbols, days: int = 30) -> Tuple[pd.DataFrame, Dict]
+    async def calculate_portfolio_hedge_correlation(self, portfolio_symbols, hedge_symbols, days: int = 30) -> Dict[str, float]
+```
+**What it does**: Analyzes correlations between portfolio positions and hedging instruments
+**For new developers**: Key for understanding hedge effectiveness and portfolio diversification
+
+**Chart Generator (`charts.py`)**:
+```python
+class ChartGenerator:
+    async def generate_correlation_heatmap(self, correlation_matrix: pd.DataFrame) -> Optional[str]
+    async def generate_pnl_chart(self, pnl_data: Dict[str, List[float]], timestamps: List[str]) -> Optional[str]
+    async def generate_stress_test_chart(self, stress_results: Dict[str, float]) -> Optional[str]
+```
+**What it does**: Generates visual charts and analytics for Telegram interface
+**For new developers**: Creates professional visualizations for user reports
+
+**Stress Testing (`stress_testing.py`)**:
+```python
+class StressTesting:
+    async def run_stress_test(self, portfolio_positions: Dict, hedge_positions: List[Dict] = None, scenario_name: str = "market_crash_20") -> Dict
+    def get_available_scenarios(self) -> List[Dict]
+```
+**What it does**: Implements scenario-based stress testing for portfolio risk assessment
+**For new developers**: Critical for understanding portfolio behavior under extreme market conditions
+
+#### **8. Risk Management (`src/risk/`)**
+
+**Greeks Calculation (`greeks.py`)**:
+```python
+def black_scholes_delta(S: float, K: float, T: float, r: float, sigma: float, option_type: str = "call") -> float
+def black_scholes_gamma(S: float, K: float, T: float, r: float, sigma: float) -> float
+def calculate_portfolio_delta(positions: list, prices: Dict[str, float]) -> float
+```
+**What it does**: Implements Black-Scholes model and Greeks calculations for options
+**For new developers**: Mathematical foundation for options pricing and risk management
+
+**Risk Metrics (`metrics.py`)**:
+```python
+def calculate_portfolio_risk(positions: List[Dict[str, Any]], prices: Dict[str, float]) -> Dict[str, Any]
+def calculate_concentration_risk(positions: List[Dict[str, Any]], prices: Dict[str, float]) -> Dict[str, float]
+def generate_risk_report(positions: List[Dict[str, Any]], prices: Dict[str, float]) -> str
+```
+**What it does**: Comprehensive risk assessment and reporting
+**For new developers**: Essential for understanding portfolio risk exposure
+
+#### **9. User Interface (`src/bot/keyboards.py`)**
 
 **Key Functions**:
 ```python
@@ -434,6 +557,7 @@ def get_hedge_menu() -> InlineKeyboardMarkup
 1. **Market Data**: Exchange APIs → `get_current_price()` → Portfolio calculations
 2. **User Input**: Telegram → `handle_callback()` → Strategy logic → Portfolio update
 3. **Risk Monitoring**: Background task → Risk metrics → Telegram alerts
+4. **Analytics**: Historical data → Correlation analysis → Chart generation → Reports
 
 ### 🎯 Where to Start for New Developers
 
@@ -456,6 +580,18 @@ def get_hedge_menu() -> InlineKeyboardMarkup
 2. **Look at one hedge flow** - e.g., protective put in the bot
 3. **Follow the data** - how does the strategy get applied to the portfolio?
 4. **Check the analytics** - how is performance measured?
+
+#### **If you want to understand analytics**:
+1. **Start with `src/analytics/historical_data.py`** - understand data collection
+2. **Study `src/analytics/correlation.py`** - understand correlation analysis
+3. **Look at `src/analytics/charts.py`** - understand visualization
+4. **Check `src/analytics/stress_testing.py`** - understand risk scenarios
+
+#### **If you want to understand risk management**:
+1. **Start with `src/risk/greeks.py`** - understand options pricing
+2. **Study `src/risk/metrics.py`** - understand risk calculations
+3. **Look at the risk watcher** - understand real-time monitoring
+4. **Check stress testing** - understand scenario analysis
 
 ### 🔧 Common Patterns
 
@@ -497,6 +633,32 @@ self.portfolio.record_transaction(symbol, qty, price, ...)
 self.active_hedges.append(hedge_data)
 ```
 
+#### **Analytics Pattern**:
+```python
+# Get historical data
+historical_data = await self.data_collector.get_portfolio_historical_data(symbols, days)
+
+# Calculate correlations
+correlation_matrix = await self.correlation_analyzer.calculate_portfolio_correlation_matrix(
+    portfolio_symbols, hedge_symbols, days
+)
+
+# Generate charts
+chart_path = await self.chart_generator.generate_correlation_heatmap(correlation_matrix)
+```
+
+#### **Risk Calculation Pattern**:
+```python
+# Calculate portfolio risk
+risk_metrics = calculate_portfolio_risk(positions, prices)
+
+# Calculate Greeks
+portfolio_delta = calculate_portfolio_delta(positions, prices)
+
+# Generate risk report
+risk_report = generate_risk_report(positions, prices)
+```
+
 ### 🚨 Important Notes for New Developers
 
 1. **Async/Await**: The entire bot is async - understand Python's async patterns
@@ -504,6 +666,9 @@ self.active_hedges.append(hedge_data)
 3. **Error Handling**: Always wrap exchange calls in try/catch
 4. **State Management**: Portfolio state is in-memory - consider persistence
 5. **Testing**: Use the test files to understand expected behavior
+6. **Analytics**: New analytics modules require matplotlib and seaborn
+7. **Risk Management**: Greeks calculations use Black-Scholes model
+8. **Data Caching**: Historical data is cached to improve performance
 
 ### 📚 Key Files to Study
 
@@ -522,6 +687,16 @@ self.active_hedges.append(hedge_data)
 **For understanding costs**:
 - `src/services/costing.py` - Fee and cost calculations
 - `src/services/hedge.py` - Hedge optimization logic
+
+**For understanding analytics**:
+- `src/analytics/historical_data.py` - Data collection and caching
+- `src/analytics/correlation.py` - Correlation analysis
+- `src/analytics/charts.py` - Chart generation and visualization
+- `src/analytics/stress_testing.py` - Scenario-based stress testing
+
+**For understanding risk management**:
+- `src/risk/greeks.py` - Black-Scholes and Greeks calculations
+- `src/risk/metrics.py` - Comprehensive risk assessment
 
 ### Data Structures
 
@@ -569,6 +744,24 @@ class OptionLeg:
     vega: float = 0.0
 ```
 
+#### Analytics Data
+```python
+@dataclass
+class HistoricalData:
+    timestamp: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+@dataclass
+class CorrelationResult:
+    correlation_matrix: pd.DataFrame
+    missing_data: Dict[str, int]
+    insights: List[str]
+```
+
 ### User Interface
 
 #### Main Menu Structure
@@ -598,6 +791,7 @@ class OptionLeg:
 ```
 📊 By Position    🛡️ By Hedge
 📈 Performance    💰 Cost-Benefit
+🔄 Correlation    📊 Stress Test
 ```
 
 ## 🔧 Installation & Setup
@@ -620,6 +814,9 @@ pip install -r requirements.txt
 - `pandas==2.3.1`: Data manipulation
 - `numpy==2.3.1`: Numerical computing
 - `websockets==15.0.1`: Real-time data feeds
+- `matplotlib==3.8.4`: Chart generation
+- `seaborn==0.13.2`: Statistical visualization
+- `scipy==1.16.0`: Scientific computing
 
 ### Environment Variables
 ```bash
@@ -633,6 +830,17 @@ DERIBIT_SECRET_KEY=your_deribit_secret_key
 ### Running the Bot
 ```bash
 python main.py
+```
+
+### Utility Scripts
+```bash
+# Fetch option chain data
+python fetch_option_chain.py
+
+# Run specific tests
+python tests/test_analytics.py
+python tests/test_stress_testing.py
+python tests/test_correlation.py
 ```
 
 ## 📊 Usage Examples
@@ -658,12 +866,24 @@ python main.py
    - "🛡️ By Hedge": Hedge performance breakdown
    - "📈 Performance": Attribution analysis
    - "💰 Cost-Benefit": Cost vs. benefit analysis
+   - "🔄 Correlation": Portfolio correlation matrix
+   - "📊 Stress Test": Scenario-based stress testing
 
 ### Risk Configuration
 1. Select "⚙️ Risk Config" from main menu
 2. Choose metric to edit (Delta, VaR, Drawdown)
 3. Enter new threshold value
 4. Confirm changes
+
+### Running Stress Tests
+1. Select "📈 Analytics" from main menu
+2. Choose "📊 Stress Test"
+3. Select stress scenario:
+   - Market Crash (-20%)
+   - Severe Market Crash (-50%)
+   - Volatility Spike
+   - Flash Crash
+4. Review results and impact on portfolio
 
 ## 🔄 Callback Data System
 
@@ -706,6 +926,12 @@ def decode_callback_data(callback_data: str) -> tuple[str, str, dict]:
 - **Drawdown**: Historical peak to current value tracking
 - **Greeks**: Delta, gamma, theta, vega for options
 
+### Advanced Risk Analytics
+- **Concentration Risk**: Largest position and top 3 concentration analysis
+- **Delta Exposure**: Breakdown by instrument type (spot, perpetual, options)
+- **Correlation Analysis**: Portfolio correlation matrix and hedge effectiveness
+- **Stress Testing**: Scenario-based risk assessment
+
 ### Cost Analysis
 - **Fee Calculation**: Exchange-specific fee rates
 - **Slippage Estimation**: Market impact modeling
@@ -732,6 +958,12 @@ def decode_callback_data(callback_data: str) -> tuple[str, str, dict]:
 - **Net Benefit**: Cost vs. benefit analysis
 - **ROI Metrics**: Return on hedge investment
 
+### Advanced Analytics
+- **Historical Data Analysis**: Multi-exchange data collection and caching
+- **Correlation Analysis**: Portfolio correlation matrix and insights
+- **Chart Generation**: Professional visualizations for reports
+- **Stress Testing**: Scenario-based risk assessment
+
 ## 🔧 Advanced Features
 
 ### Dynamic Hedge Optimization
@@ -742,7 +974,7 @@ def decode_callback_data(callback_data: str) -> tuple[str, str, dict]:
 
 ### Option Strategy Implementation
 - **8 Strategies**: Straddle, butterfly, iron condor, etc.
-- **Greeks Calculation**: Real-time option Greeks
+- **Greeks Calculation**: Real-time option Greeks using Black-Scholes
 - **Payoff Analysis**: Risk/reward profiles
 - **Cost Estimation**: Premium and margin requirements
 
@@ -752,6 +984,18 @@ def decode_callback_data(callback_data: str) -> tuple[str, str, dict]:
 - **Volume Analysis**: Trading volume and frequency
 - **Type Classification**: Transaction categorization
 
+### Advanced Analytics & Reporting
+- **Multi-exchange Data**: Historical data from OKX and Deribit
+- **Correlation Analysis**: Portfolio correlation matrix and hedge effectiveness
+- **Visual Analytics**: Professional charts and heatmaps
+- **Stress Testing**: Scenario-based risk assessment with multiple predefined scenarios
+
+### Risk Management Enhancements
+- **Black-Scholes Implementation**: Complete options pricing model
+- **Portfolio-level Greeks**: Aggregate Greeks across all positions
+- **Concentration Risk**: Largest position and concentration analysis
+- **Real-time Risk Reports**: Human-readable risk summaries
+
 ## 🚀 Future Enhancements
 
 ### Planned Features
@@ -760,32 +1004,12 @@ def decode_callback_data(callback_data: str) -> tuple[str, str, dict]:
 - **Backtesting**: Historical strategy performance
 - **Mobile App**: Native mobile application
 - **API Integration**: REST API for external access
+- **Database Integration**: Persistent data storage
+- **Advanced Charting**: Interactive charts and dashboards
 
 ### Technical Improvements
-- **Database Integration**: Persistent data storage
 - **WebSocket Optimization**: Enhanced real-time feeds
 - **Performance Monitoring**: System health metrics
 - **Error Recovery**: Robust error handling
-
-## 📝 License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
-
-## 📞 Support
-
-For support and questions:
-- Create an issue on GitHub
-- Contact the development team
-- Check the documentation
-
----
-
-**GoQuant** - Advanced crypto trading with intelligent hedging strategies.
+- **Data Persistence**: Database integration for historical data
+- **Advanced Risk Models**: More sophisticated risk calculations
