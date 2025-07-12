@@ -1,5 +1,6 @@
 """Telegram bot core for the spot hedging bot."""
 
+import os
 import asyncio
 import aiohttp
 from telegram import Update
@@ -1005,6 +1006,20 @@ class SpotHedgerBot:
                         callback_data=encode_callback_data("analytics", "cost_benefit"),
                     ),
                 ],
+                [
+                    InlineKeyboardButton(
+                        "🔗 Correlation",
+                        callback_data=encode_callback_data("analytics", "correlation"),
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🧪 Stress Testing",
+                        callback_data=encode_callback_data(
+                            "analytics", "stress_testing"
+                        ),
+                    ),
+                ],
                 [InlineKeyboardButton("🔙 Back", callback_data="back")],
             ]
             await query.edit_message_text(
@@ -1396,6 +1411,18 @@ class SpotHedgerBot:
             await self.show_performance_attribution(update, context)
         elif step == "cost_benefit":
             await self.show_cost_benefit_analysis(update, context)
+        elif step == "correlation":
+            await self.show_correlation_analysis(update, context)
+        elif step == "correlation_chart":
+            await self.show_correlation_chart(update, context)
+        elif step == "stress_testing":
+            await self.show_stress_testing_menu(update, context)
+        elif step == "stress_test_run":
+            scenario_name = data.get("scenario", "market_crash_20")
+            await self.run_stress_test(update, context, scenario_name)
+        elif step == "stress_test_chart":
+            scenario_name = data.get("scenario", "market_crash_20")
+            await self.show_stress_test_chart(update, context, scenario_name)
         else:
             await query.edit_message_text(
                 "Unknown analytics action.", reply_markup=get_back_button()
@@ -5205,6 +5232,564 @@ class SpotHedgerBot:
         await query.edit_message_text(
             text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
         )
+
+    async def show_correlation_analysis(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        """Show correlation analysis between portfolio positions and hedges."""
+        query = update.callback_query
+        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+        from ..analytics.correlation import correlation_analyzer
+
+        try:
+            # Get portfolio symbols
+            portfolio_symbols = []
+            for position in self.portfolio.positions.values():
+                portfolio_symbols.append(position.symbol)
+
+            if not portfolio_symbols:
+                await query.edit_message_text(
+                    "❌ No portfolio positions found for correlation analysis.",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("⬅️ Back", callback_data="analytics")]]
+                    ),
+                    parse_mode="Markdown",
+                )
+                return
+
+            # Get hedge symbols
+            hedge_symbols = []
+            for hedge in getattr(self, "active_hedges", []):
+                symbol = hedge.get("symbol", "")
+                if symbol:
+                    hedge_symbols.append(symbol)
+
+            # Show loading message
+            await query.edit_message_text(
+                "🔄 Calculating correlation matrix...",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ Back", callback_data="analytics")]]
+                ),
+                parse_mode="Markdown",
+            )
+
+            # Calculate correlation matrix and get insufficient data info
+            correlation_matrix, insufficient_data = (
+                await correlation_analyzer.calculate_portfolio_correlation_matrix(
+                    portfolio_symbols, hedge_symbols, days=30
+                )
+            )
+
+            if correlation_matrix.empty:
+                # Always show data points for all symbols
+                all_symbols = portfolio_symbols + hedge_symbols
+                missing_text = "\n".join(
+                    [
+                        f"• {symbol}: {insufficient_data.get(symbol, 0)} data points"
+                        for symbol in all_symbols
+                    ]
+                )
+                await query.edit_message_text(
+                    f"❌ Unable to calculate correlation matrix. Insufficient data for the following symbols:\n\n{missing_text}\n\nAt least 10 data points are required per symbol.",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("⬅️ Back", callback_data="analytics")]]
+                    ),
+                    parse_mode="Markdown",
+                )
+                return
+
+            # Format correlation matrix for display
+            correlation_text = (
+                correlation_analyzer.format_correlation_matrix_for_telegram(
+                    correlation_matrix, max_decimals=3
+                )
+            )
+
+            # Get insights
+            insights = correlation_analyzer.get_correlation_insights(
+                correlation_matrix, portfolio_symbols
+            )
+
+            # Combine text and insights
+            full_text = correlation_text + "\n\n*Insights:*\n" + "\n".join(insights)
+
+            # Create keyboard with options
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "📊 Show Chart",
+                        callback_data=encode_callback_data(
+                            "analytics", "correlation_chart"
+                        ),
+                    )
+                ],
+                [InlineKeyboardButton("⬅️ Back", callback_data="analytics")],
+            ]
+
+            await query.edit_message_text(
+                full_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown",
+            )
+
+        except Exception as e:
+            logger.error(f"Error in correlation analysis: {e}")
+            await query.edit_message_text(
+                "❌ Error calculating correlation analysis. Please try again.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ Back", callback_data="analytics")]]
+                ),
+                parse_mode="Markdown",
+            )
+
+    async def show_correlation_chart(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        """Show correlation matrix as a heatmap chart."""
+        query = update.callback_query
+        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+        from ..analytics.correlation import correlation_analyzer
+        from ..analytics.charts import ChartGenerator
+
+        try:
+            # Get portfolio symbols
+            portfolio_symbols = []
+            for position in self.portfolio.positions.values():
+                portfolio_symbols.append(position.symbol)
+
+            if not portfolio_symbols:
+                await query.edit_message_text(
+                    "❌ No portfolio positions found for correlation chart.",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("⬅️ Back", callback_data="analytics")]]
+                    ),
+                    parse_mode="Markdown",
+                )
+                return
+
+            # Get hedge symbols
+            hedge_symbols = []
+            for hedge in getattr(self, "active_hedges", []):
+                symbol = hedge.get("symbol", "")
+                if symbol:
+                    hedge_symbols.append(symbol)
+
+            # Show loading message
+            await query.edit_message_text(
+                "🔄 Generating correlation chart...",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ Back", callback_data="analytics")]]
+                ),
+                parse_mode="Markdown",
+            )
+
+            # Calculate correlation matrix and get insufficient data info
+            correlation_matrix, insufficient_data = (
+                await correlation_analyzer.calculate_portfolio_correlation_matrix(
+                    portfolio_symbols, hedge_symbols, days=30
+                )
+            )
+
+            if correlation_matrix.empty:
+                await query.edit_message_text(
+                    "❌ Unable to generate correlation chart. Insufficient data.",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("⬅️ Back", callback_data="analytics")]]
+                    ),
+                    parse_mode="Markdown",
+                )
+                return
+
+            # Generate heatmap chart
+            chart_generator = ChartGenerator()
+            chart_path = await chart_generator.generate_correlation_heatmap(
+                correlation_matrix
+            )
+
+            if chart_path:
+                # Send the chart image
+                with open(chart_path, "rb") as photo:
+                    await query.message.reply_photo(
+                        photo=photo,
+                        caption="📊 Correlation Matrix Heatmap",
+                        reply_markup=InlineKeyboardMarkup(
+                            [
+                                [
+                                    InlineKeyboardButton(
+                                        "⬅️ Back", callback_data="analytics|correlation"
+                                    )
+                                ]
+                            ]
+                        ),
+                    )
+
+                # Clean up the temporary file
+                import os
+
+                os.remove(chart_path)
+
+                # Edit the original message to show success
+                await query.edit_message_text(
+                    "✅ Correlation chart generated successfully!",
+                    reply_markup=InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "⬅️ Back", callback_data="analytics|correlation"
+                                )
+                            ]
+                        ]
+                    ),
+                )
+            else:
+                await query.edit_message_text(
+                    "❌ Failed to generate correlation chart.",
+                    reply_markup=InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "⬅️ Back", callback_data="analytics|correlation"
+                                )
+                            ]
+                        ]
+                    ),
+                    parse_mode="Markdown",
+                )
+
+        except Exception as e:
+            logger.error(f"Error generating correlation chart: {e}")
+            await query.edit_message_text(
+                "❌ Error generating correlation chart. Please try again.",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "⬅️ Back", callback_data="analytics|correlation"
+                            )
+                        ]
+                    ]
+                ),
+                parse_mode="Markdown",
+            )
+
+    async def show_stress_testing_menu(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ):
+        """Show stress testing scenario selection menu."""
+        query = update.callback_query
+        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+        from ..analytics.stress_testing import stress_testing
+
+        try:
+            # Get available scenarios
+            scenarios = stress_testing.get_available_scenarios()
+
+            text = "🧪 *Stress Testing Scenarios*\n\nSelect a scenario to test your portfolio under different market conditions:"
+
+            # Create keyboard with scenario options
+            keyboard = []
+            for scenario in scenarios:
+                keyboard.append(
+                    [
+                        InlineKeyboardButton(
+                            scenario["name"],
+                            callback_data=encode_callback_data(
+                                "analytics",
+                                "stress_test_run",
+                                {"scenario": scenario["id"]},
+                            ),
+                        )
+                    ]
+                )
+
+            keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="analytics")])
+
+            await query.edit_message_text(
+                text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
+            )
+
+        except Exception as e:
+            logger.error(f"Error in stress testing menu: {e}")
+            await query.edit_message_text(
+                "❌ Error loading stress testing scenarios.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ Back", callback_data="analytics")]]
+                ),
+                parse_mode="Markdown",
+            )
+
+    async def run_stress_test(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, scenario_name: str
+    ):
+        """Run a specific stress test scenario."""
+        query = update.callback_query
+        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+        from ..analytics.stress_testing import stress_testing
+
+        try:
+            # Show loading message
+            await query.edit_message_text(
+                "🔄 Running stress test...",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "⬅️ Back", callback_data="analytics|stress_testing"
+                            )
+                        ]
+                    ]
+                ),
+                parse_mode="Markdown",
+            )
+
+            # Convert portfolio positions to dictionary format
+            portfolio_positions = {}
+            for symbol, position in self.portfolio.positions.items():
+                portfolio_positions[symbol] = {
+                    "qty": position.qty,
+                    "avg_px": position.avg_px,
+                    "instrument_type": position.instrument_type,
+                }
+
+            # Get hedge positions
+            hedge_positions = getattr(self, "active_hedges", [])
+
+            # Run stress test
+            results = await stress_testing.run_stress_test(
+                portfolio_positions=portfolio_positions,
+                hedge_positions=hedge_positions,
+                scenario_name=scenario_name,
+            )
+
+            if not results:
+                await query.edit_message_text(
+                    "❌ Failed to run stress test. Please try again.",
+                    reply_markup=InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "⬅️ Back", callback_data="analytics|stress_testing"
+                                )
+                            ]
+                        ]
+                    ),
+                    parse_mode="Markdown",
+                )
+                return
+
+                # Format and display results
+            results_text = stress_testing.format_stress_test_results(results)
+
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "📊 Show Chart",
+                        callback_data=encode_callback_data(
+                            "analytics",
+                            "stress_test_chart",
+                            {"scenario": scenario_name},
+                        ),
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🔄 Run Another Test", callback_data="analytics|stress_testing"
+                    )
+                ],
+                [InlineKeyboardButton("⬅️ Back", callback_data="analytics")],
+            ]
+
+            await query.edit_message_text(
+                results_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="Markdown",
+            )
+
+        except Exception as e:
+            logger.error(f"Error running stress test: {e}")
+            await query.edit_message_text(
+                "❌ Error running stress test. Please try again.",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "⬅️ Back", callback_data="analytics|stress_testing"
+                            )
+                        ]
+                    ]
+                ),
+                parse_mode="Markdown",
+            )
+
+    async def show_stress_test_chart(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, scenario_name: str
+    ):
+        """Show stress test chart for a specific scenario."""
+        query = update.callback_query
+        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+        from ..analytics.stress_testing import stress_testing
+        from ..analytics.charts import chart_generator
+
+        try:
+            # Show loading message
+            await query.edit_message_text(
+                "🔄 Generating stress test chart...",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "⬅️ Back", callback_data="analytics|stress_testing"
+                            )
+                        ]
+                    ]
+                ),
+                parse_mode="Markdown",
+            )
+
+            # Convert portfolio positions to dictionary format
+            portfolio_positions = {}
+            for symbol, position in self.portfolio.positions.items():
+                portfolio_positions[symbol] = {
+                    "qty": position.qty,
+                    "avg_px": position.avg_px,
+                    "instrument_type": position.instrument_type,
+                }
+
+            # Get hedge positions
+            hedge_positions = getattr(self, "active_hedges", [])
+
+            # Run stress test to get results
+            results = await stress_testing.run_stress_test(
+                portfolio_positions=portfolio_positions,
+                hedge_positions=hedge_positions,
+                scenario_name=scenario_name,
+            )
+
+            if not results:
+                await query.edit_message_text(
+                    "❌ Failed to generate stress test chart. Please try again.",
+                    reply_markup=InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "⬅️ Back", callback_data="analytics|stress_testing"
+                                )
+                            ]
+                        ]
+                    ),
+                    parse_mode="Markdown",
+                )
+                return
+
+            # Generate chart
+            # chart_path = await chart_generator.generate_stress_test_chart(
+            #     stress_results=[results]
+            # )
+            # Fix: pass a dict mapping scenario name to P&L impact
+            scenario_name_str = (
+                results["scenario"]["name"]
+                if "scenario" in results and "name" in results["scenario"]
+                else scenario_name
+            )
+            pnl_impact = (
+                results["risk_changes"]["pnl_change"]
+                if "risk_changes" in results and "pnl_change" in results["risk_changes"]
+                else 0.0
+            )
+
+            # Debug logging
+            logger.info(f"Generating chart for scenario: {scenario_name_str}")
+            logger.info(f"P&L impact: {pnl_impact}")
+
+            chart_path = await chart_generator.generate_stress_test_chart(
+                stress_results={scenario_name_str: pnl_impact}
+            )
+
+            logger.info(f"Chart path: {chart_path}")
+
+            if chart_path and os.path.exists(chart_path):
+                # Send the chart image
+                with open(chart_path, "rb") as photo:
+                    await query.message.reply_photo(
+                        photo=photo,
+                        caption=f"📊 Stress Test Chart: {results['scenario']['name']}",
+                        reply_markup=InlineKeyboardMarkup(
+                            [
+                                [
+                                    InlineKeyboardButton(
+                                        "⬅️ Back",
+                                        callback_data=encode_callback_data(
+                                            "analytics",
+                                            "stress_test_run",
+                                            {"scenario": scenario_name},
+                                        ),
+                                    )
+                                ]
+                            ]
+                        ),
+                    )
+
+                # Clean up the temporary file
+                os.remove(chart_path)
+
+                # Edit the original message to show success
+                await query.edit_message_text(
+                    "✅ Stress test chart generated successfully!",
+                    reply_markup=InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "⬅️ Back",
+                                    callback_data=encode_callback_data(
+                                        "analytics",
+                                        "stress_test_run",
+                                        {"scenario": scenario_name},
+                                    ),
+                                )
+                            ]
+                        ]
+                    ),
+                )
+            else:
+                await query.edit_message_text(
+                    "❌ Failed to generate stress test chart.",
+                    reply_markup=InlineKeyboardMarkup(
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "⬅️ Back",
+                                    callback_data=encode_callback_data(
+                                        "analytics",
+                                        "stress_test_run",
+                                        {"scenario": scenario_name},
+                                    ),
+                                )
+                            ]
+                        ]
+                    ),
+                    parse_mode="Markdown",
+                )
+
+        except Exception as e:
+            logger.error(f"Error generating stress test chart: {e}")
+            await query.edit_message_text(
+                "❌ Error generating stress test chart. Please try again.",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "⬅️ Back",
+                                callback_data=encode_callback_data(
+                                    "analytics",
+                                    "stress_test_run",
+                                    {"scenario": scenario_name},
+                                ),
+                            )
+                        ]
+                    ]
+                ),
+                parse_mode="Markdown",
+            )
 
 
 async def main():
