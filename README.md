@@ -821,10 +821,6 @@ pip install -r requirements.txt
 ### Environment Variables
 ```bash
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
-OKX_API_KEY=your_okx_api_key
-OKX_SECRET_KEY=your_okx_secret_key
-DERIBIT_API_KEY=your_deribit_api_key
-DERIBIT_SECRET_KEY=your_deribit_secret_key
 ```
 
 ### Running the Bot
